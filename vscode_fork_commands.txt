@@ -1,0 +1,60 @@
+ACUXCODE ESSENTIAL COMMANDS
+===========================
+
+QUICK START (First Time Setup)
+-------------------------------
+cd /Users/aaravpatel/Desktop/Developer/AcuxAI/AcuxCode/vscode
+npm install
+npm run watch
+
+Then wait 2-3 minutes for initial compilation to complete.
+
+
+DAILY DEVELOPMENT WORKFLOW
+---------------------------
+
+1. START WATCH MODE (Terminal 1):
+   cd /Users/aaravpatel/Desktop/Developer/AcuxAI/AcuxCode/vscode
+   npm run watch
+
+2. LAUNCH ACUXCODE (Terminal 2):
+   cd /Users/aaravpatel/Desktop/Developer/AcuxAI/AcuxCode/vscode
+   ./scripts/code.sh
+
+   OR use the full path:
+   cd /Users/aaravpatel/Desktop/Developer/AcuxAI/AcuxCode/vscode && ./scripts/code.sh
+
+
+MANAGEMENT COMMANDS
+-------------------
+
+STOP WATCH BUILD:
+pkill -f "npm run watch"
+
+KILL ACUXCODE:
+pkill -9 -f "code-oss"
+
+CHECK IF WATCH IS RUNNING:
+ps aux | grep "npm run watch"
+
+
+ONE-TIME COMPILATION (No Watch)
+--------------------------------
+cd /Users/aaravpatel/Desktop/Developer/AcuxAI/AcuxCode/vscode
+npm run compile
+
+
+THEME LOCATION
+--------------
+Deep Dark+ Theme:
+/Users/aaravpatel/Desktop/Developer/AcuxAI/AcuxCode/vscode/extensions/theme-defaults/themes/deep-dark-plus.json
+
+Access in AcuxCode: Cmd+K Cmd+T → Select "Deep Dark+"
+
+
+CURRENT STATUS
+--------------
+✅ VS Code Marketplace connected
+✅ Extensions working (Cmd+Shift+X)
+✅ Deep Dark+ theme available (dark blue syntax)
+✅ Loading animation in Copilot sidebar
