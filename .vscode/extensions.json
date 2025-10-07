@@ -1,0 +1,8 @@
+{
+  // Mark Copilot extensions as unwanted in this workspace
+  "unwantedRecommendations": [
+    "GitHub.copilot",
+    "GitHub.copilot-chat",
+    "GitHub.copilot-labs"
+  ]
+}

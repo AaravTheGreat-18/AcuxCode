@@ -1,0 +1,12 @@
+{
+  // Disable GitHub Copilot in this workspace
+  "github.copilot.enable": {
+    "*": false
+  },
+  // Disable Copilot inline suggestions if the extension still tries to show them
+  "github.copilot.inlineSuggest.enable": false,
+  // Belt-and-suspenders: disable all inline suggestions from the editor side
+  "editor.inlineSuggest.enabled": false,
+  // Disable Copilot Chat (if installed)
+  "github.copilot.chat.enabled": false
+}
