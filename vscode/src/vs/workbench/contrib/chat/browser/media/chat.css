@@ -1857,15 +1857,16 @@ have to be updated for changes to the rules above, or to support more deeply nes
 
 .ai-sidebar-input-section {
     padding: 16px 20px;
-    flex: 1;
+    flex: 0 0 auto; /* Fixed at bottom - don't grow or shrink */
     display: flex;
     flex-direction: column;
-    min-height: 0;
+    border-top: 1px solid var(--vscode-panel-border);
+    background-color: var(--vscode-editor-background);
 }
 
 .ai-sidebar-response-section {
-    flex: 1;
-    padding: 0 20px 20px 20px;
+    flex: 1; /* Take up all remaining space */
+    padding: 20px;
     overflow-y: auto;
     min-height: 0;
 }

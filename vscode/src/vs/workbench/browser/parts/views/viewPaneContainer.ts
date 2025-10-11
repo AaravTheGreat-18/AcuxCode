@@ -706,6 +706,9 @@ export class ViewPaneContainer extends Component implements IViewPaneContainer {
 			for (let i = 0; i < this.viewContainerModel.visibleViewDescriptors.length; i++) {
 				const pane = this.panes[i];
 				const viewDescriptor = this.viewContainerModel.visibleViewDescriptors[i];
+				if (!pane || !viewDescriptor) {
+					continue;
+				}
 				const size = this.viewContainerModel.getSize(viewDescriptor.id);
 
 				if (typeof size === 'number') {

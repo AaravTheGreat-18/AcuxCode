@@ -608,7 +608,10 @@ export abstract class ViewPane extends Pane implements IView {
 	}
 
 	private calculateTitle(title: string): string {
-		const viewContainer = this.viewDescriptorService.getViewContainerByViewId(this.id)!;
+		const viewContainer = this.viewDescriptorService.getViewContainerByViewId(this.id);
+		if (!viewContainer) {
+			return title;
+		}
 		const model = this.viewDescriptorService.getViewContainerModel(viewContainer);
 		const viewDescriptor = this.viewDescriptorService.getViewDescriptorById(this.id);
 		const isDefault = this.viewDescriptorService.getDefaultContainerById(this.id) === viewContainer;

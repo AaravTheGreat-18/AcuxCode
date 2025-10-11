@@ -392,7 +392,7 @@ class LocalChatSessionsProvider extends Disposable implements IChatSessionItemPr
 		// Listen for new chat widgets being added/removed
 		this._register(this.chatWidgetService.onDidAddWidget(widget => {
 			// Only fire for chat view instance
-			if (widget.location === ChatAgentLocation.Panel &&
+			if (widget.location === ChatAgentLocation.Chat &&
 				typeof widget.viewContext === 'object' &&
 				'viewId' in widget.viewContext &&
 				widget.viewContext.viewId === LocalChatSessionsProvider.CHAT_WIDGET_VIEW_ID) {
@@ -415,7 +415,7 @@ class LocalChatSessionsProvider extends Disposable implements IChatSessionItemPr
 		}));
 
 		// Check for existing chat widgets and register listeners
-		const existingWidgets = this.chatWidgetService.getWidgetsByLocations(ChatAgentLocation.Panel)
+		const existingWidgets = this.chatWidgetService.getWidgetsByLocations(ChatAgentLocation.Chat)
 			.filter(widget => typeof widget.viewContext === 'object' && 'viewId' in widget.viewContext && widget.viewContext.viewId === LocalChatSessionsProvider.CHAT_WIDGET_VIEW_ID);
 
 		existingWidgets.forEach(widget => {
@@ -522,7 +522,7 @@ class LocalChatSessionsProvider extends Disposable implements IChatSessionItemPr
 		});
 
 		// Add chat view instance
-		const chatWidget = this.chatWidgetService.getWidgetsByLocations(ChatAgentLocation.Panel)
+		const chatWidget = this.chatWidgetService.getWidgetsByLocations(ChatAgentLocation.Chat)
 			.find(widget => typeof widget.viewContext === 'object' && 'viewId' in widget.viewContext && widget.viewContext.viewId === LocalChatSessionsProvider.CHAT_WIDGET_VIEW_ID);
 		const status = chatWidget?.viewModel?.model ? this.modelToStatus(chatWidget.viewModel.model) : undefined;
 		const widgetSession: ILocalChatSessionItem & ChatSessionItemWithProvider = {
@@ -1731,7 +1731,7 @@ class SessionsViewPane extends ViewPane {
 					const providerType = sessionWithProvider.provider.chatSessionType;
 					const options: IChatEditorOptions = {
 						pinned: true,
-						preferredTitle: truncate(element.label, 30),
+						title: { preferred: truncate(element.label, 30) },
 						preserveFocus: true,
 					};
 					await this.editorService.openEditor({
@@ -1766,7 +1766,7 @@ class SessionsViewPane extends ViewPane {
 			const options: IChatEditorOptions = {
 				pinned: true,
 				ignoreInView: true,
-				preferredTitle: truncate(element.label, 30),
+				title: { preferred: truncate(element.label, 30) },
 				preserveFocus: true,
 			};
 			await this.editorService.openEditor({

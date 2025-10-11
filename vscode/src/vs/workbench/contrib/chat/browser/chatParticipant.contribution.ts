@@ -52,6 +52,7 @@ const chatViewDescriptor: IViewDescriptor[] = [{
 	name: localize2('chat.viewContainer.label', "Chat"),
 	canToggleVisibility: false,
 	canMoveView: true,
+	ctorDescriptor: new SyncDescriptor(ChatViewPane, [{ location: ChatAgentLocation.Chat }]),
 	openCommandActionDescriptor: {
 		id: CHAT_SIDEBAR_PANEL_ID,
 		title: chatViewContainer.title,
@@ -63,10 +64,10 @@ const chatViewDescriptor: IViewDescriptor[] = [{
 			}
 		},
 		order: 1
-	},
-	ctorDescriptor: new SyncDescriptor(ChatViewPane, [{ location: ChatAgentLocation.Chat }])
+	}
 	// AcuxCode: Removed 'when' condition to always show the AI sidebar
 }];
+
 Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews(chatViewDescriptor, chatViewContainer);
 
 const chatParticipantExtensionPoint = extensionsRegistry.ExtensionsRegistry.registerExtensionPoint<IRawChatParticipantContribution[]>({

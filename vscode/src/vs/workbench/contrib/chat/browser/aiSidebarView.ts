@@ -5,14 +5,11 @@
 
 import * as dom from '../../../../base/browser/dom.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { localize } from '../../../../nls.js';
-import { AISidebarInput } from './aiSidebarInput.js';
 
 const $ = dom.$;
 
 export class AISidebarView extends Disposable {
     private container!: HTMLElement;
-    private inputComponent!: AISidebarInput;
 
     constructor() {
         super();
@@ -22,74 +19,81 @@ export class AISidebarView extends Disposable {
     }
 
     private create(): void {
-        // Create main sidebar container
-        this.container = $('.ai-sidebar-view');
-        console.log('[AcuxCode] AI sidebar container created');
+        // Create main container
+        this.container = $('div.ai-sidebar-simple');
+        
+        // Set inline styles to ensure visibility
+        this.container.style.width = '100%';
+        this.container.style.height = '100%';
+        this.container.style.backgroundColor = '#1e1e1e';
+        this.container.style.color = '#ffffff';
+        this.container.style.padding = '20px';
+        this.container.style.display = 'flex';
+        this.container.style.flexDirection = 'column';
+        this.container.style.gap = '20px';
+        
+        console.log('[AcuxCode] Container created with styles');
 
-        // Create welcome section
-        const welcomeSection = $('.ai-sidebar-welcome');
-        this.container.appendChild(welcomeSection);
+        // Add a simple header
+        const header = $('h1');
+        header.textContent = 'AcuxCode AI Sidebar';
+        header.style.margin = '0';
+        header.style.fontSize = '24px';
+        header.style.color = '#4ec9b0';
+        this.container.appendChild(header);
+        console.log('[AcuxCode] Header added');
 
-        const welcomeTitle = $('.ai-sidebar-welcome-title');
-        welcomeTitle.textContent = localize('aiSidebar.welcome.title', 'Welcome to AcuxCode AI');
-        welcomeSection.appendChild(welcomeTitle);
+        // Add a subtitle
+        const subtitle = $('p');
+        subtitle.textContent = 'This is a test to verify the sidebar is rendering correctly.';
+        subtitle.style.margin = '0';
+        subtitle.style.fontSize = '14px';
+        subtitle.style.color = '#cccccc';
+        this.container.appendChild(subtitle);
+        console.log('[AcuxCode] Subtitle added');
 
-        const welcomeSubtitle = $('.ai-sidebar-welcome-subtitle');
-        welcomeSubtitle.textContent = localize('aiSidebar.welcome.subtitle', 'Your intelligent coding companion');
-        welcomeSection.appendChild(welcomeSubtitle);
-
-        // Create input section
-        const inputSection = $('.ai-sidebar-input-section');
-        this.container.appendChild(inputSection);
-
-        // Create the input component
-        this.inputComponent = this._register(new AISidebarInput());
-
-        // Listen for input submissions
-        this._register(this.inputComponent.onDidSubmit((value) => {
-            this.handleInputSubmission(value);
-        }));
-
-        inputSection.appendChild(this.inputComponent.getDomNode());
-
-        // Create response area (for future use)
-        const responseSection = $('.ai-sidebar-response-section');
-        this.container.appendChild(responseSection);
-
-        const responseArea = $('.ai-sidebar-response-area');
-        responseSection.appendChild(responseArea);
-    }
-
-    private handleInputSubmission(value: string): void {
-        // For now, just log the input. Later this will send to AI service
-        console.log('AI Sidebar input submitted:', value);
-
-        // Show a simple response for demonstration
-        this.showResponse(`You said: "${value}"`);
-    }
-
-    private showResponse(response: string): void {
-        const responseArea = this.container.querySelector('.ai-sidebar-response-area') as HTMLElement;
-        if (responseArea) {
-            const responseElement = $('.ai-sidebar-response');
-            responseElement.textContent = response;
-            responseArea.appendChild(responseElement);
-        }
+        // Add a simple input box at the bottom
+        const inputContainer = $('div');
+        inputContainer.style.marginTop = 'auto';
+        inputContainer.style.display = 'flex';
+        inputContainer.style.flexDirection = 'column';
+        inputContainer.style.gap = '10px';
+        
+        const inputLabel = $('label');
+        inputLabel.textContent = 'Test Input:';
+        inputLabel.style.fontSize = '12px';
+        inputLabel.style.color = '#cccccc';
+        inputContainer.appendChild(inputLabel);
+        
+        const input = $('input', { type: 'text', placeholder: 'Type something here...' }) as HTMLInputElement;
+        input.style.padding = '10px';
+        input.style.backgroundColor = '#2d2d2d';
+        input.style.color = '#ffffff';
+        input.style.border = '1px solid #3e3e3e';
+        input.style.borderRadius = '4px';
+        input.style.fontSize = '14px';
+        inputContainer.appendChild(input);
+        
+        this.container.appendChild(inputContainer);
+        console.log('[AcuxCode] Input box added at bottom');
+        
+        console.log('[AcuxCode] Container children count:', this.container.children.length);
     }
 
     public getDomNode(): HTMLElement {
+        console.log('[AcuxCode] getDomNode called, returning:', this.container);
         return this.container;
     }
 
     public focus(): void {
-        this.inputComponent.focus();
+        console.log('[AcuxCode] focus called');
     }
 
     public getValue(): string {
-        return this.inputComponent.getValue();
+        return '';
     }
 
     public setValue(value: string): void {
-        this.inputComponent.setValue(value);
+        console.log('[AcuxCode] setValue called with:', value);
     }
 }
