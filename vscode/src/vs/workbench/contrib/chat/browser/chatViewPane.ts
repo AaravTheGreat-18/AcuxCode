@@ -56,8 +56,8 @@ export class ChatViewPane extends ViewPane implements IViewWelcomeDelegate {
 		// DO NOT call super.renderBody() - it creates ViewWelcomeController which shows "drag view here"
 		// Instead, directly render our sidebar
 		
-		// Create and render the AI sidebar view
-		this._aiSidebarView = this._register(new AISidebarView());
+		// Create and render the AI sidebar view using instantiation service
+		this._aiSidebarView = this._register(this.instantiationService.createInstance(AISidebarView));
 		const domNode = this._aiSidebarView.getDomNode();
 		console.log('[AcuxCode] AI Sidebar DOM node created:', domNode);
 		console.log('[AcuxCode] DOM node has', domNode.children.length, 'children');
