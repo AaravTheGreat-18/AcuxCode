@@ -16,6 +16,7 @@ import { IChatWidgetService } from './chat.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ResourceLabels } from '../../../browser/labels.js';
 import * as event from '../../../../base/common/event.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 
 const $ = dom.$;
 
@@ -26,11 +27,17 @@ export class AISidebarView extends Disposable {
     private resourceLabels!: ResourceLabels;
     private inputElement!: HTMLTextAreaElement;
     private selectedModel: string = 'GPT-4';
+	private autoModeEnabled: boolean = false;
+	private recentModels: string[] = [];
+	private readonly storageKeySelectedModel = 'acuxcode.chat.selectedModel';
+	private readonly storageKeyRecentModels = 'acuxcode.chat.recentModels';
+	private readonly storageKeyAutoMode = 'acuxcode.chat.autoMode';
 
     constructor(
         @IQuickInputService private readonly quickInputService: IQuickInputService,
         @IChatWidgetService private readonly chatWidgetService: IChatWidgetService,
-        @IInstantiationService private readonly instantiationService: IInstantiationService
+        @IInstantiationService private readonly instantiationService: IInstantiationService,
+        @IStorageService private readonly storageService: IStorageService
     ) {
         super();
         console.log('[AcuxCode] AISidebarView constructor called');
@@ -115,32 +122,433 @@ export class AISidebarView extends Disposable {
         controlsArea.style.padding = '8px 12px';
         controlsArea.style.backgroundColor = 'var(--vscode-input-background)';
         
-        // Create model dropdown
-        const modelSelect = $('select') as HTMLSelectElement;
-        modelSelect.style.padding = '4px 8px';
-        modelSelect.style.fontSize = '11px';
-        modelSelect.style.fontWeight = '600';
-        modelSelect.style.border = '1px solid var(--vscode-input-border)';
-        modelSelect.style.borderRadius = '6px';
-        modelSelect.style.backgroundColor = 'var(--vscode-input-background)';
-        modelSelect.style.color = 'var(--vscode-input-foreground)';
-        modelSelect.style.cursor = 'pointer';
-        modelSelect.style.outline = 'none';
-        
-        // Add model options
-        const models = ['GPT-4', 'GPT-3.5', 'Claude 3', 'Gemini'];
-        models.forEach(modelName => {
-            const option = $('option') as HTMLOptionElement;
-            option.value = modelName;
-            option.textContent = modelName;
-            modelSelect.appendChild(option);
-        });
-        
-        // Track selected model
-        modelSelect.onchange = () => {
-            this.selectedModel = modelSelect.value;
-            console.log('[AcuxCode] Model changed to:', this.selectedModel);
+        // Create custom model selector (with provider groups, search, and usage)
+        type ModelInfo = { name: string; provider: string; usage: string };
+        const availableModels: ModelInfo[] = [
+            // Basic (0.5 request)
+            { name: 'Gemini 2.0 Flash', provider: 'Google', usage: '0.5 request' },
+            { name: 'Gemini 2.5 Flash', provider: 'Google', usage: '0.5 request' },
+            { name: 'DeepSeek-Chat', provider: 'DeepSeek', usage: '0.5 request' },
+            { name: 'DeepSeek-Reasoner', provider: 'DeepSeek', usage: '0.5 request' },
+            { name: 'GPT-4o Mini', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-5 Mini', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-5 Nano', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-4.1 Mini', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-4.1 Nano', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'Grok 3 Mini', provider: 'xAI', usage: '0.5 request' },
+            { name: 'Claude 3.5 Haiku', provider: 'Anthropic', usage: '0.5 request' },
+            { name: 'Llama 4 Scout', provider: 'Meta', usage: '0.5 request' },
+            { name: 'o3 mini', provider: 'OpenAI', usage: '0.5 request' },
+
+            // Premium (default 1 request unless specified)
+            { name: 'DeepSeek-R1', provider: 'DeepSeek', usage: '1 request' },
+            { name: 'DeepSeek-V3', provider: 'DeepSeek', usage: '1 request' },
+            { name: 'GPT-4o', provider: 'OpenAI', usage: '1 request' },
+            { name: 'Claude 3.5 Sonnet', provider: 'Anthropic', usage: '1 request' },
+            { name: 'Claude 3.7 Sonnet', provider: 'Anthropic', usage: '1 request' },
+            { name: 'Claude Sonnet 4', provider: 'Anthropic', usage: '2 requests' },
+            { name: 'Claude 4.5 Sonnet', provider: 'Anthropic', usage: '2 requests' },
+            { name: 'Claude 4.5 Sonnet Thinking', provider: 'Anthropic', usage: '2.5 requests' },
+            { name: 'GPT-4.1', provider: 'OpenAI', usage: '1 request' },
+            { name: 'Grok 3 Beta', provider: 'xAI', usage: '1 request' },
+            { name: 'Gemini 2.0 Pro', provider: 'Google', usage: '1 request' },
+            { name: 'Gemini 2.5 Pro', provider: 'Google', usage: '1 request' },
+            { name: 'o3', provider: 'OpenAI', usage: '1 request' },
+            { name: 'GPT-5', provider: 'OpenAI', usage: '1 request' },
+            { name: 'Kimi K2', provider: 'Kimi', usage: '1 request' },
+            { name: 'Grok 4 Fast', provider: 'xAI', usage: '1 request' },
+
+            // Enterprise/Master (20 requests)
+            { name: 'Claude 3 Opus', provider: 'Anthropic', usage: '20 requests' },
+            { name: 'GPT-4', provider: 'OpenAI', usage: '20 requests' },
+            { name: 'Claude Opus 4', provider: 'Anthropic', usage: '20 requests' },
+            { name: 'GPT-4 Turbo', provider: 'OpenAI', usage: '20 requests' }
+        ];
+
+        const modelDropdownRoot = $('div');
+        modelDropdownRoot.style.position = 'relative';
+        modelDropdownRoot.style.display = 'inline-block';
+
+        const modelButton = $('button');
+        modelButton.style.padding = '4px 8px';
+        modelButton.style.fontSize = '11px';
+        modelButton.style.fontWeight = '600';
+        modelButton.style.border = '1px solid var(--vscode-input-border)';
+        modelButton.style.borderRadius = '6px';
+        modelButton.style.backgroundColor = 'var(--vscode-input-background)';
+        modelButton.style.color = 'var(--vscode-input-foreground)';
+        modelButton.style.cursor = 'pointer';
+        modelButton.style.outline = 'none';
+        modelButton.style.display = 'flex';
+        modelButton.style.alignItems = 'center';
+        modelButton.style.gap = '6px';
+
+		// Persistence helpers
+		const PERSIST_SCOPE = StorageScope.PROFILE;
+		const persistState = () => {
+			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyAutoMode, this.autoModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyRecentModels, JSON.stringify(this.recentModels), PERSIST_SCOPE, StorageTarget.USER);
+		};
+		const loadPersistedState = (all: ModelInfo[]) => {
+			const savedModel = this.storageService.get(this.storageKeySelectedModel, PERSIST_SCOPE);
+			const savedAuto = this.storageService.get(this.storageKeyAutoMode, PERSIST_SCOPE);
+			const savedRecents = this.storageService.get(this.storageKeyRecentModels, PERSIST_SCOPE);
+			if (savedModel && all.some(m => m.name === savedModel)) {
+				this.selectedModel = savedModel;
+			}
+			this.autoModeEnabled = savedAuto === '1';
+			try {
+				if (savedRecents) {
+					const parsed = JSON.parse(savedRecents);
+					if (Array.isArray(parsed)) {
+						this.recentModels = parsed.filter((n: unknown) => typeof n === 'string').slice(0, 3);
+					}
+				}
+			} catch { /* ignore parse errors */ }
+		};
+
+		// Set default selected model
+		this.selectedModel = 'Gemini 2.0 Flash';
+		loadPersistedState(availableModels);
+		const setButtonLabel = () => {
+			modelButton.textContent = '';
+			if (this.autoModeEnabled) {
+				const autoSpan = $('span');
+				autoSpan.textContent = 'Auto';
+				autoSpan.style.fontWeight = '700';
+				modelButton.appendChild(autoSpan);
+				return;
+			}
+			const nameSpan = $('span');
+			nameSpan.textContent = this.selectedModel;
+			nameSpan.style.fontWeight = '400';
+			nameSpan.style.opacity = '0.85';
+			modelButton.appendChild(nameSpan);
+		};
+
+		const trackRecentModel = (name: string) => {
+			// Maintain unique last-3 list
+			this.recentModels = [name, ...this.recentModels.filter(n => n !== name)].slice(0, 3);
+			persistState();
+		};
+        setButtonLabel();
+
+        const dropdownPanel = $('div');
+        dropdownPanel.style.position = 'fixed';
+        dropdownPanel.style.left = '0px';
+        dropdownPanel.style.top = '0px';
+        dropdownPanel.style.minWidth = '260px';
+        dropdownPanel.style.maxWidth = '360px';
+        dropdownPanel.style.maxHeight = '500px';
+        dropdownPanel.style.overflow = 'hidden';
+        dropdownPanel.style.border = '1px solid var(--vscode-input-border)';
+        dropdownPanel.style.borderRadius = '8px';
+        dropdownPanel.style.background = 'var(--vscode-editor-background)';
+        dropdownPanel.style.boxShadow = '0 6px 18px rgba(0,0,0,0.2)';
+        dropdownPanel.style.display = 'none';
+        dropdownPanel.style.zIndex = '10000';
+
+		// Auto mode toggle (top of dropdown)
+		const autoContainer = $('div');
+		autoContainer.style.display = 'flex';
+		autoContainer.style.alignItems = 'center';
+		autoContainer.style.justifyContent = 'space-between';
+		autoContainer.style.padding = '8px 10px 6px 10px';
+		const autoLabel = $('div');
+		autoLabel.textContent = 'Auto';
+		autoLabel.style.fontSize = '12px';
+		autoLabel.style.fontWeight = '600';
+		autoLabel.style.color = 'var(--vscode-foreground)';
+		// Apple-like switch
+		const autoSwitch = $('button') as HTMLButtonElement;
+		autoSwitch.setAttribute('role', 'switch');
+		autoSwitch.setAttribute('aria-label', 'Auto');
+		autoSwitch.style.width = '36px';
+		autoSwitch.style.height = '22px';
+		autoSwitch.style.minWidth = '36px';
+		autoSwitch.style.border = 'none';
+		autoSwitch.style.margin = '0';
+		autoSwitch.style.padding = '0';
+		autoSwitch.style.borderRadius = '999px';
+		autoSwitch.style.position = 'relative';
+		autoSwitch.style.cursor = 'pointer';
+		autoSwitch.style.outline = 'none';
+		autoSwitch.style.background = 'var(--vscode-input-border)';
+		const knob = $('div');
+		knob.style.position = 'absolute';
+		knob.style.top = '3px';
+		knob.style.left = '3px';
+		knob.style.width = '16px';
+		knob.style.height = '16px';
+		knob.style.borderRadius = '999px';
+		knob.style.background = 'var(--vscode-editor-background)';
+		knob.style.boxShadow = '0 1px 2px rgba(0,0,0,0.25)';
+		knob.style.transition = 'transform 120ms ease, left 120ms ease, background 120ms ease';
+		autoSwitch.appendChild(knob);
+		const setSwitchState = (on: boolean) => {
+			autoSwitch.setAttribute('aria-checked', on ? 'true' : 'false');
+			autoSwitch.style.background = on ? 'var(--vscode-button-background)' : 'var(--vscode-input-border)';
+			knob.style.left = on ? '17px' : '3px';
+			knob.style.background = on ? 'var(--vscode-editor-background)' : 'var(--vscode-editor-background)';
+		};
+		setSwitchState(this.autoModeEnabled);
+		const toggleAuto = () => {
+			this.autoModeEnabled = !this.autoModeEnabled;
+			setSwitchState(this.autoModeEnabled);
+			setButtonLabel();
+			updateInteractivity();
+			renderList(searchInput.value);
+			persistState();
+		};
+		autoSwitch.onclick = (e) => {
+			e.preventDefault();
+			toggleAuto();
+		};
+		autoSwitch.onkeydown = (e) => {
+			if (e.key === ' ' || e.key === 'Enter') {
+				e.preventDefault();
+				toggleAuto();
+			}
+		};
+		autoContainer.appendChild(autoLabel);
+		autoContainer.appendChild(autoSwitch);
+
+		// Search bar
+        const searchContainer = $('div');
+        searchContainer.style.padding = '8px';
+        const searchInput = $('input', { type: 'text', placeholder: 'Search models...' }) as HTMLInputElement;
+        searchInput.style.width = '100%';
+        searchInput.style.boxSizing = 'border-box';
+        searchInput.style.padding = '6px 8px';
+        searchInput.style.border = '1px solid var(--vscode-input-border)';
+        searchInput.style.borderRadius = '4px';
+        searchInput.style.background = 'var(--vscode-input-background)';
+        searchInput.style.color = 'var(--vscode-input-foreground)';
+        searchContainer.appendChild(searchInput);
+
+        // List area
+        const listScroll = $('div');
+        listScroll.style.overflow = 'auto';
+        listScroll.style.maxHeight = '440px';
+
+        const providers = Array.from(new Set(availableModels.map(m => m.provider)));
+
+		const renderList = (filter: string) => {
+            while (listScroll.firstChild) {
+                listScroll.removeChild(listScroll.firstChild);
+            }
+            const norm = (s: string) => s.toLowerCase();
+            const f = norm(filter || '');
+
+			// Recently used
+			if (this.recentModels.length > 0) {
+				const recentModelsInfo = this.recentModels
+					.map(n => availableModels.find(m => m.name === n))
+					.filter((m): m is ModelInfo => !!m)
+					.filter(m => !f || norm(m.name).includes(f));
+				if (recentModelsInfo.length > 0) {
+					const rHeader = $('div');
+					rHeader.textContent = 'Recently used';
+					rHeader.style.position = 'sticky';
+					rHeader.style.top = '0';
+					rHeader.style.zIndex = '1';
+					rHeader.style.padding = '6px 8px';
+					rHeader.style.background = 'var(--vscode-editor-background)';
+					rHeader.style.color = 'var(--vscode-descriptionForeground)';
+					rHeader.style.fontSize = '10px';
+					rHeader.style.fontWeight = '700';
+					rHeader.style.textTransform = 'uppercase';
+					listScroll.appendChild(rHeader);
+
+					recentModelsInfo.forEach(model => {
+						const item = $('div');
+						item.style.display = 'flex';
+						item.style.alignItems = 'center';
+						item.style.justifyContent = 'space-between';
+						item.style.gap = '8px';
+						item.style.padding = '8px';
+						item.style.cursor = 'pointer';
+						item.style.fontSize = '12px';
+						item.style.borderTop = '1px solid var(--vscode-widget-border, transparent)';
+						if (this.autoModeEnabled) { item.style.pointerEvents = 'none'; item.style.opacity = '0.6'; }
+						const name = $('span');
+						name.textContent = model.name;
+						name.style.color = 'var(--vscode-foreground)';
+						name.style.whiteSpace = 'nowrap';
+						name.style.overflow = 'hidden';
+						name.style.textOverflow = 'ellipsis';
+						const usage = $('span');
+						usage.textContent = model.usage;
+						usage.style.color = 'var(--vscode-descriptionForeground)';
+						usage.style.fontSize = '11px';
+						item.appendChild(name);
+						item.appendChild(usage);
+
+						item.onmouseenter = () => { if (!this.autoModeEnabled) { item.style.background = 'var(--vscode-list-hoverBackground)'; } };
+						item.onmouseleave = () => item.style.background = 'transparent';
+						item.onclick = () => {
+							if (this.autoModeEnabled) { return; }
+							this.selectedModel = model.name;
+							trackRecentModel(model.name);
+							setButtonLabel();
+							dropdownPanel.style.display = 'none';
+							console.log('[AcuxCode] Model changed to:', this.selectedModel);
+						};
+						listScroll.appendChild(item);
+					});
+				}
+			}
+			providers.forEach(provider => {
+                const models = availableModels.filter(m => m.provider === provider && (!f || norm(m.name).includes(f)));
+                if (models.length === 0) {
+                    return;
+                }
+                const header = $('div');
+                header.textContent = provider;
+                header.style.position = 'sticky';
+                header.style.top = '0';
+                header.style.zIndex = '1';
+                header.style.padding = '6px 8px';
+                header.style.background = 'var(--vscode-editor-background)';
+                header.style.color = 'var(--vscode-descriptionForeground)';
+                header.style.fontSize = '10px';
+                header.style.fontWeight = '700';
+                header.style.textTransform = 'uppercase';
+                listScroll.appendChild(header);
+
+				models.forEach(model => {
+                    const item = $('div');
+                    item.style.display = 'flex';
+                    item.style.alignItems = 'center';
+                    item.style.justifyContent = 'space-between';
+                    item.style.gap = '8px';
+                    item.style.padding = '8px';
+                    item.style.cursor = 'pointer';
+                    item.style.fontSize = '12px';
+                    item.style.borderTop = '1px solid var(--vscode-widget-border, transparent)';
+					if (this.autoModeEnabled) { item.style.pointerEvents = 'none'; item.style.opacity = '0.6'; }
+                    const name = $('span');
+                    name.textContent = model.name;
+                    name.style.color = 'var(--vscode-foreground)';
+                    name.style.whiteSpace = 'nowrap';
+                    name.style.overflow = 'hidden';
+                    name.style.textOverflow = 'ellipsis';
+                    const usage = $('span');
+                    usage.textContent = model.usage;
+                    usage.style.color = 'var(--vscode-descriptionForeground)';
+                    usage.style.fontSize = '11px';
+                    item.appendChild(name);
+                    item.appendChild(usage);
+
+					item.onmouseenter = () => { if (!this.autoModeEnabled) { item.style.background = 'var(--vscode-list-hoverBackground)'; } };
+                    item.onmouseleave = () => item.style.background = 'transparent';
+                    item.onclick = () => {
+						if (this.autoModeEnabled) { return; }
+						this.selectedModel = model.name;
+						trackRecentModel(model.name);
+						setButtonLabel();
+						dropdownPanel.style.display = 'none';
+						console.log('[AcuxCode] Model changed to:', this.selectedModel);
+                    };
+                    listScroll.appendChild(item);
+                });
+            });
         };
+
+        renderList('');
+        searchInput.oninput = () => renderList(searchInput.value);
+
+		dropdownPanel.appendChild(autoContainer);
+		dropdownPanel.appendChild(searchContainer);
+        dropdownPanel.appendChild(listScroll);
+
+		const updateInteractivity = () => {
+			searchInput.disabled = this.autoModeEnabled;
+			listScroll.style.pointerEvents = this.autoModeEnabled ? 'none' : 'auto';
+			listScroll.style.opacity = this.autoModeEnabled ? '0.6' : '1';
+		};
+
+        // Render dropdown in body to avoid clipping by overflow/scroll containers
+        document.body.appendChild(dropdownPanel);
+
+        const positionDropdown = () => {
+            const btnRect = modelButton.getBoundingClientRect();
+            const viewportHeight = window.innerHeight;
+            const panelMaxHeight = Math.min(500, Math.max(200, viewportHeight - 24));
+            dropdownPanel.style.maxHeight = panelMaxHeight + 'px';
+
+            // Preferred: open upwards if there is more space above; otherwise open below
+            const spaceBelow = viewportHeight - btnRect.bottom;
+            const spaceAbove = btnRect.top;
+            const openUpwards = spaceAbove > spaceBelow;
+
+            const panelWidth = Math.min(360, Math.max(260, btnRect.width));
+            dropdownPanel.style.width = panelWidth + 'px';
+
+            const left = Math.min(Math.max(8, btnRect.left), Math.max(8, window.innerWidth - panelWidth - 8));
+            dropdownPanel.style.left = left + 'px';
+
+            if (openUpwards) {
+                const desiredBottom = viewportHeight - btnRect.top + 4; // 4px gap
+                dropdownPanel.style.bottom = desiredBottom + 'px';
+                dropdownPanel.style.top = '';
+            } else {
+                const top = btnRect.bottom + 4; // 4px gap
+                dropdownPanel.style.top = top + 'px';
+                dropdownPanel.style.bottom = '';
+            }
+        };
+
+        const openDropdown = () => {
+            positionDropdown();
+            dropdownPanel.style.display = 'block';
+            searchInput.focus();
+            window.addEventListener('scroll', positionDropdown, true);
+            window.addEventListener('resize', positionDropdown);
+        };
+        const closeDropdown = () => {
+            dropdownPanel.style.display = 'none';
+            window.removeEventListener('scroll', positionDropdown, true);
+            window.removeEventListener('resize', positionDropdown);
+        };
+
+        let outsideClickHandler: ((e: MouseEvent) => void) | null = null;
+        modelButton.onclick = (e) => {
+            e.stopPropagation();
+            if (dropdownPanel.style.display === 'none') {
+                openDropdown();
+                if (!outsideClickHandler) {
+                    outsideClickHandler = (ev: MouseEvent) => {
+                        if (!dropdownPanel.contains(ev.target as Node) && ev.target !== modelButton) {
+                            closeDropdown();
+                            if (outsideClickHandler) {
+                                document.removeEventListener('click', outsideClickHandler);
+                                outsideClickHandler = null;
+                            }
+                        }
+                    };
+                    document.addEventListener('click', outsideClickHandler);
+                }
+            } else {
+                closeDropdown();
+                if (outsideClickHandler) {
+                    document.removeEventListener('click', outsideClickHandler);
+                    outsideClickHandler = null;
+                }
+            }
+        };
+
+        // Keyboard handling for search (Esc to close)
+        searchInput.onkeydown = (ev) => {
+            if (ev.key === 'Escape') {
+                closeDropdown();
+                modelButton.focus();
+            }
+        };
+
+        modelDropdownRoot.appendChild(modelButton);
+        modelDropdownRoot.appendChild(dropdownPanel);
         
         // Create send button (circular with clean arrow)
         const sendButton = $('button');
@@ -246,7 +654,7 @@ export class AISidebarView extends Disposable {
         leftControls.style.display = 'flex';
         leftControls.style.gap = '8px';
         leftControls.style.alignItems = 'center';
-        leftControls.appendChild(modelSelect);
+        leftControls.appendChild(modelDropdownRoot);
         leftControls.appendChild(addFileButton);
         
         // Assemble the controls area
