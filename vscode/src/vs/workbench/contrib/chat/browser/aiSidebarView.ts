@@ -26,6 +26,7 @@ export class AISidebarView extends Disposable {
     private filesDisplayArea!: HTMLElement;
     private resourceLabels!: ResourceLabels;
     private inputElement!: HTMLTextAreaElement;
+    private messagesArea!: HTMLElement;
     private selectedModel: string = 'GPT-4';
 	private autoModeEnabled: boolean = false;
 	private recentModels: string[] = [];
@@ -64,10 +65,15 @@ export class AISidebarView extends Disposable {
         
         console.log('[AcuxCode] Container created with styles');
 
-        // Add spacer to push input to bottom
-        const spacer = $('div');
-        spacer.style.flex = '1';
-        this.container.appendChild(spacer);
+        // Create messages area at the top
+        this.messagesArea = $('div');
+        this.messagesArea.style.flex = '1';
+        this.messagesArea.style.overflow = 'auto';
+        this.messagesArea.style.display = 'flex';
+        this.messagesArea.style.flexDirection = 'column';
+        this.messagesArea.style.gap = '12px';
+        this.messagesArea.style.paddingBottom = '20px';
+        this.container.appendChild(this.messagesArea);
 
         // Add input box at the bottom
         const inputContainer = $('div');
@@ -792,6 +798,11 @@ export class AISidebarView extends Disposable {
         console.log('[AcuxCode] Model:', this.selectedModel);
         console.log('[AcuxCode] Attached files count:', this.attachedFiles.length);
         
+        // Display user message
+        if (message) {
+            this.displayUserMessage(message);
+        }
+        
         if (this.attachedFiles.length > 0) {
             console.log('[AcuxCode] Attached files:');
             this.attachedFiles.forEach((file, index) => {
@@ -820,7 +831,64 @@ export class AISidebarView extends Disposable {
         this.attachedFiles = [];
         this.updateFilesDisplay();
         
+        // Display sample AI response
+        setTimeout(() => {
+            const sampleResponse = `I understand you're asking about "${message}". Here's what I can help you with:\n\nI'm AcuxCode AI, your coding assistant. I can help you with code analysis, debugging, refactoring, and answering questions about your codebase. Feel free to attach files or ask specific questions about your code.\n\nWhat would you like to work on today?`;
+            this.displayAIMessage(sampleResponse);
+        }, 500);
+        
         console.log('[AcuxCode] Input cleared, ready for next message');
+    }
+    
+    private displayUserMessage(message: string): void {
+        // Create user message bubble
+        const messageBubble = $('div');
+        messageBubble.style.display = 'flex';
+        messageBubble.style.justifyContent = 'flex-end';
+        messageBubble.style.width = '100%';
+        
+        const messageContent = $('div');
+        messageContent.style.maxWidth = '70%';
+        messageContent.style.padding = '10px 14px';
+        messageContent.style.border = '1px solid var(--vscode-input-border)';
+        messageContent.style.borderRadius = '12px';
+		messageContent.style.marginRight = '12px';
+        messageContent.style.fontSize = '13px';
+        messageContent.style.lineHeight = '1.5';
+        messageContent.style.color = 'var(--vscode-foreground)';
+        messageContent.style.whiteSpace = 'pre-wrap';
+        messageContent.style.wordBreak = 'break-word';
+        messageContent.textContent = message;
+        
+        messageBubble.appendChild(messageContent);
+        this.messagesArea.appendChild(messageBubble);
+        
+        // Scroll to bottom
+        this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+    }
+    
+    private displayAIMessage(message: string): void {
+        // Create AI message (no bubble, just paragraph on left)
+        const messageContainer = $('div');
+        messageContainer.style.display = 'flex';
+        messageContainer.style.justifyContent = 'flex-start';
+        messageContainer.style.width = '100%';
+        
+        const messageContent = $('div');
+        messageContent.style.maxWidth = '85%';
+        messageContent.style.marginLeft = '12px';
+        messageContent.style.fontSize = '13px';
+        messageContent.style.lineHeight = '1.6';
+        messageContent.style.color = 'var(--vscode-foreground)';
+        messageContent.style.whiteSpace = 'pre-wrap';
+        messageContent.style.wordBreak = 'break-word';
+        messageContent.textContent = message;
+        
+        messageContainer.appendChild(messageContent);
+        this.messagesArea.appendChild(messageContainer);
+        
+        // Scroll to bottom
+        this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
     }
     
     private updateFilesDisplay(): void {
