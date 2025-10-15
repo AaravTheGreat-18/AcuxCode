@@ -30,9 +30,11 @@ export class AISidebarView extends Disposable {
     private selectedModel: string = 'GPT-4';
 	private autoModeEnabled: boolean = false;
 	private recentModels: string[] = [];
+	private customModels: Array<{ type: string; name: string; endpoint: string; modelIdentifier: string; apiKey: string }> = [];
 	private readonly storageKeySelectedModel = 'acuxcode.chat.selectedModel';
 	private readonly storageKeyRecentModels = 'acuxcode.chat.recentModels';
 	private readonly storageKeyAutoMode = 'acuxcode.chat.autoMode';
+	private readonly storageKeyCustomModels = 'acuxcode.chat.customModels';
 
     constructor(
         @IQuickInputService private readonly quickInputService: IQuickInputService,
@@ -195,14 +197,13 @@ export class AISidebarView extends Disposable {
 			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
 			this.storageService.store(this.storageKeyAutoMode, this.autoModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
 			this.storageService.store(this.storageKeyRecentModels, JSON.stringify(this.recentModels), PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels), PERSIST_SCOPE, StorageTarget.USER);
 		};
 		const loadPersistedState = (all: ModelInfo[]) => {
 			const savedModel = this.storageService.get(this.storageKeySelectedModel, PERSIST_SCOPE);
 			const savedAuto = this.storageService.get(this.storageKeyAutoMode, PERSIST_SCOPE);
 			const savedRecents = this.storageService.get(this.storageKeyRecentModels, PERSIST_SCOPE);
-			if (savedModel && all.some(m => m.name === savedModel)) {
-				this.selectedModel = savedModel;
-			}
+			const savedCustomModels = this.storageService.get(this.storageKeyCustomModels, PERSIST_SCOPE);
 			this.autoModeEnabled = savedAuto === '1';
 			try {
 				if (savedRecents) {
@@ -211,7 +212,20 @@ export class AISidebarView extends Disposable {
 						this.recentModels = parsed.filter((n: unknown) => typeof n === 'string').slice(0, 3);
 					}
 				}
+				if (savedCustomModels) {
+					const parsed = JSON.parse(savedCustomModels);
+					if (Array.isArray(parsed)) {
+						this.customModels = parsed;
+					}
+				}
 			} catch { /* ignore parse errors */ }
+			if (savedModel) {
+				const isBuiltIn = all.some(m => m.name === savedModel);
+				const isCustom = this.customModels.some(m => m.name === savedModel);
+				if (isBuiltIn || isCustom) {
+					this.selectedModel = savedModel;
+				}
+			}
 		};
 
 		// Set default selected model
@@ -254,6 +268,7 @@ export class AISidebarView extends Disposable {
         dropdownPanel.style.boxShadow = '0 6px 18px rgba(0,0,0,0.2)';
         dropdownPanel.style.display = 'none';
         dropdownPanel.style.zIndex = '10000';
+        dropdownPanel.style.flexDirection = 'column';
 
 		// Auto mode toggle (top of dropdown)
 		const autoContainer = $('div');
@@ -336,7 +351,9 @@ export class AISidebarView extends Disposable {
         // List area
         const listScroll = $('div');
         listScroll.style.overflow = 'auto';
-        listScroll.style.maxHeight = '440px';
+        listScroll.style.maxHeight = '380px';
+        listScroll.style.flex = '1';
+        listScroll.style.minHeight = '0';
 
         const providers = Array.from(new Set(availableModels.map(m => m.provider)));
 
@@ -460,14 +477,147 @@ export class AISidebarView extends Disposable {
                     listScroll.appendChild(item);
                 });
             });
+            
+            // My Models section (at the bottom)
+			if (this.customModels.length > 0) {
+				const filteredCustom = this.customModels.filter(m => !f || norm(m.name).includes(f));
+				if (filteredCustom.length > 0) {
+					const customHeader = $('div');
+					customHeader.textContent = 'My Models';
+					customHeader.style.position = 'sticky';
+					customHeader.style.top = '0';
+					customHeader.style.zIndex = '1';
+					customHeader.style.padding = '6px 8px';
+					customHeader.style.background = 'var(--vscode-editor-background)';
+					customHeader.style.color = 'var(--vscode-descriptionForeground)';
+					customHeader.style.fontSize = '10px';
+					customHeader.style.fontWeight = '700';
+					customHeader.style.textTransform = 'uppercase';
+					listScroll.appendChild(customHeader);
+
+					filteredCustom.forEach(model => {
+						const item = $('div');
+						item.style.display = 'flex';
+						item.style.alignItems = 'center';
+						item.style.justifyContent = 'space-between';
+						item.style.gap = '8px';
+						item.style.padding = '8px';
+						item.style.cursor = 'pointer';
+						item.style.fontSize = '12px';
+						item.style.borderTop = '1px solid var(--vscode-widget-border, transparent)';
+						if (this.autoModeEnabled) { item.style.pointerEvents = 'none'; item.style.opacity = '0.6'; }
+						
+						const name = $('span');
+						name.textContent = model.name;
+						name.style.color = 'var(--vscode-foreground)';
+						name.style.whiteSpace = 'nowrap';
+						name.style.overflow = 'hidden';
+						name.style.textOverflow = 'ellipsis';
+						name.style.flex = '1';
+						item.appendChild(name);
+
+						// Actions (edit/delete) on hover
+						const actions = $('div');
+						actions.style.display = 'none';
+						actions.style.gap = '4px';
+
+						const makeIconButton = (label: string) => {
+							const btn = $('button');
+							btn.textContent = label;
+							btn.style.border = '1px solid var(--vscode-input-border)';
+							btn.style.background = 'var(--vscode-input-background)';
+							btn.style.color = 'var(--vscode-foreground)';
+							btn.style.fontSize = '10px';
+							btn.style.padding = '3px 8px';
+							btn.style.borderRadius = '3px';
+							btn.style.cursor = 'pointer';
+							btn.style.lineHeight = '1';
+							btn.onmouseenter = () => btn.style.background = 'var(--vscode-button-hoverBackground)';
+							btn.onmouseleave = () => btn.style.background = 'var(--vscode-input-background)';
+							return btn;
+						};
+
+						const editBtn = makeIconButton('Edit');
+						const deleteBtn = makeIconButton('Delete');
+						deleteBtn.style.color = 'var(--vscode-errorForeground)';
+						actions.appendChild(editBtn);
+						actions.appendChild(deleteBtn);
+						item.appendChild(actions);
+
+						editBtn.onclick = (e) => {
+							e.stopPropagation();
+							dropdownPanel.style.display = 'none';
+							this.showAddModelPage(model);
+						};
+						
+						deleteBtn.onclick = (e) => {
+							e.stopPropagation();
+							// Remove from array
+							const index = this.customModels.findIndex(m => m.name === model.name && m.endpoint === model.endpoint);
+							if (index !== -1) {
+								this.customModels.splice(index, 1);
+								// Persist to storage
+								const PERSIST_SCOPE = StorageScope.PROFILE;
+								this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels), PERSIST_SCOPE, StorageTarget.USER);
+								// Re-render list
+								renderList(searchInput.value);
+								console.log('[AcuxCode] Custom model deleted:', model.name);
+							}
+						};
+
+						item.onmouseenter = () => { 
+							if (!this.autoModeEnabled) { 
+								item.style.background = 'var(--vscode-list-hoverBackground)'; 
+								actions.style.display = 'flex';
+							} 
+						};
+						item.onmouseleave = () => { 
+							item.style.background = 'transparent'; 
+							actions.style.display = 'none';
+						};
+						
+						item.onclick = () => {
+							if (this.autoModeEnabled) { return; }
+							this.selectedModel = model.name;
+							trackRecentModel(model.name);
+							setButtonLabel();
+							dropdownPanel.style.display = 'none';
+							console.log('[AcuxCode] Model changed to:', this.selectedModel);
+						};
+						listScroll.appendChild(item);
+					});
+				}
+			}
         };
 
         renderList('');
         searchInput.oninput = () => renderList(searchInput.value);
 
+		// Add Model button at bottom (fixed, not scrollable)
+		const addModelButton = $('button');
+		addModelButton.textContent = '+ Add Model';
+		addModelButton.style.width = '100%';
+		addModelButton.style.padding = '10px';
+		addModelButton.style.border = 'none';
+		addModelButton.style.borderTop = '1px solid var(--vscode-input-border)';
+		addModelButton.style.background = 'var(--vscode-editor-background)';
+		addModelButton.style.color = 'var(--vscode-button-foreground)';
+		addModelButton.style.fontSize = '12px';
+		addModelButton.style.fontWeight = '600';
+		addModelButton.style.cursor = 'pointer';
+		addModelButton.style.textAlign = 'center';
+		addModelButton.style.flexShrink = '0';
+		addModelButton.onmouseenter = () => addModelButton.style.background = 'var(--vscode-list-hoverBackground)';
+		addModelButton.onmouseleave = () => addModelButton.style.background = 'var(--vscode-editor-background)';
+		addModelButton.onclick = () => {
+			closeDropdown();
+			this.showAddModelPage();
+		};
+
 		dropdownPanel.appendChild(autoContainer);
 		dropdownPanel.appendChild(searchContainer);
         dropdownPanel.appendChild(listScroll);
+		dropdownPanel.appendChild(addModelButton);
 
 		const updateInteractivity = () => {
 			searchInput.disabled = this.autoModeEnabled;
@@ -810,34 +960,90 @@ export class AISidebarView extends Disposable {
             });
         }
         
-        // TODO: This is where you'll integrate with your AI backend
-        // For now, we'll just log the data that would be sent
-        const requestData = {
-            message: message,
-            model: this.selectedModel,
-            files: this.attachedFiles.map(f => ({
-                name: f.name,
-                uri: f.uri.toString(),
-                path: f.uri.fsPath
-            }))
-        };
-        
-        console.log('[AcuxCode] Request data that would be sent to AI:');
-        console.log(JSON.stringify(requestData, null, 2));
-        console.log('[AcuxCode] =====================================');
-        
         // Clear input and files after sending
         this.inputElement.value = '';
+        const filesSnapshot = [...this.attachedFiles];
         this.attachedFiles = [];
         this.updateFilesDisplay();
         
-        // Display sample AI response
-        setTimeout(() => {
-            const sampleResponse = `I understand you're asking about "${message}". Here's what I can help you with:\n\nI'm AcuxCode AI, your coding assistant. I can help you with code analysis, debugging, refactoring, and answering questions about your codebase. Feel free to attach files or ask specific questions about your code.\n\nWhat would you like to work on today?`;
-            this.displayAIMessage(sampleResponse);
-        }, 500);
+        // Send API request
+        this.sendAIRequest(message, filesSnapshot);
         
         console.log('[AcuxCode] Input cleared, ready for next message');
+    }
+    
+    private async sendAIRequest(message: string, files: Array<{ name: string; uri: URI }>): Promise<void> {
+        console.log('[AcuxCode] Sending AI request...');
+        
+        // Find the custom model configuration if it's a custom model
+        const customModel = this.customModels.find(m => m.name === this.selectedModel);
+        
+        if (!customModel) {
+            // TODO: Handle built-in models (will need backend API endpoint)
+            console.log('[AcuxCode] Built-in model selected, backend integration needed');
+            this.displayAIMessage('Built-in models require backend integration. Please add a custom model or configure the backend API.');
+            return;
+        }
+        
+        console.log('[AcuxCode] Using custom model:', customModel.name);
+        console.log('[AcuxCode] Endpoint:', customModel.endpoint);
+        console.log('[AcuxCode] Model ID:', customModel.modelIdentifier);
+        
+        try {
+            // Prepare the request body (OpenAI-compatible format)
+            const requestBody = {
+                model: customModel.modelIdentifier,
+                messages: [
+                    {
+                        role: 'user',
+                        content: message
+                    }
+                ],
+                stream: false
+            };
+            
+            // Prepare headers
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json'
+            };
+            
+            // Add API key if provided
+            if (customModel.apiKey) {
+                headers['Authorization'] = `Bearer ${customModel.apiKey}`;
+            }
+            
+            console.log('[AcuxCode] Sending request to:', `${customModel.endpoint}/chat/completions`);
+            
+            // Make the API request
+            const response = await fetch(`${customModel.endpoint}/chat/completions`, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(requestBody)
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[AcuxCode] API request failed:', response.status, errorText);
+                this.displayAIMessage(`Error: API request failed with status ${response.status}\n\n${errorText}`);
+                return;
+            }
+            
+            const data = await response.json();
+            console.log('[AcuxCode] API response received:', data);
+            
+            // Extract the response message
+            if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+                const aiMessage = data.choices[0].message.content;
+                this.displayAIMessage(aiMessage);
+            } else {
+                console.error('[AcuxCode] Unexpected response format:', data);
+                this.displayAIMessage('Error: Unexpected response format from API');
+            }
+            
+        } catch (error) {
+            console.error('[AcuxCode] API request error:', error);
+            this.displayAIMessage(`Error: Failed to connect to API\n\n${error instanceof Error ? error.message : String(error)}`);
+        }
     }
     
     private displayUserMessage(message: string): void {
@@ -889,6 +1095,334 @@ export class AISidebarView extends Disposable {
         
         // Scroll to bottom
         this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+    }
+    
+    private showAddModelPage(existingModel?: { type: string; name: string; endpoint: string; modelIdentifier: string; apiKey: string }): void {
+        // Clear messages area and show add model configuration page
+        while (this.messagesArea.firstChild) {
+            this.messagesArea.removeChild(this.messagesArea.firstChild);
+        }
+        
+        const isEditing = !!existingModel;
+        
+        // Create add model page container
+        const pageContainer = $('div');
+        pageContainer.style.padding = '20px';
+        pageContainer.style.maxWidth = '600px';
+        pageContainer.style.margin = '0 auto';
+        
+        // Title
+        const title = $('h2');
+        title.textContent = isEditing ? 'Edit Custom Model' : 'Add Custom Model';
+        title.style.fontSize = '18px';
+        title.style.fontWeight = '600';
+        title.style.marginBottom = '20px';
+        title.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(title);
+        
+        // Model Type Selection
+        const typeLabel = $('label');
+        typeLabel.textContent = 'Model Type';
+        typeLabel.style.display = 'block';
+        typeLabel.style.fontSize = '13px';
+        typeLabel.style.fontWeight = '600';
+        typeLabel.style.marginBottom = '8px';
+        typeLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(typeLabel);
+        
+        const typeSelect = $('select') as HTMLSelectElement;
+        typeSelect.style.width = '100%';
+        typeSelect.style.padding = '8px';
+        typeSelect.style.marginBottom = '20px';
+        typeSelect.style.border = '1px solid var(--vscode-input-border)';
+        typeSelect.style.borderRadius = '4px';
+        typeSelect.style.background = 'var(--vscode-input-background)';
+        typeSelect.style.color = 'var(--vscode-input-foreground)';
+        typeSelect.style.fontSize = '13px';
+        
+        ['LM Studio', 'Ollama', 'OpenAI Compatible API'].forEach(type => {
+            const option = $('option') as HTMLOptionElement;
+            option.value = type;
+            option.textContent = type;
+            typeSelect.appendChild(option);
+        });
+        if (existingModel) {
+            typeSelect.value = existingModel.type;
+        }
+        pageContainer.appendChild(typeSelect);
+        
+        // Model Name
+        const nameLabel = $('label');
+        nameLabel.textContent = 'Model Name';
+        nameLabel.style.display = 'block';
+        nameLabel.style.fontSize = '13px';
+        nameLabel.style.fontWeight = '600';
+        nameLabel.style.marginBottom = '8px';
+        nameLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(nameLabel);
+        
+        const nameInput = $('input', { type: 'text', placeholder: 'e.g., llama-3.1-70b' }) as HTMLInputElement;
+        nameInput.style.width = '100%';
+        nameInput.style.padding = '8px';
+        nameInput.style.marginBottom = '20px';
+        nameInput.style.border = '1px solid var(--vscode-input-border)';
+        nameInput.style.borderRadius = '4px';
+        nameInput.style.background = 'var(--vscode-input-background)';
+        nameInput.style.color = 'var(--vscode-input-foreground)';
+        nameInput.style.fontSize = '13px';
+        nameInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            nameInput.value = existingModel.name;
+        }
+        pageContainer.appendChild(nameInput);
+        
+        // API Endpoint
+        const endpointLabel = $('label');
+        endpointLabel.textContent = 'API Endpoint';
+        endpointLabel.style.display = 'block';
+        endpointLabel.style.fontSize = '13px';
+        endpointLabel.style.fontWeight = '600';
+        endpointLabel.style.marginBottom = '8px';
+        endpointLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(endpointLabel);
+        
+        const endpointInput = $('input', { type: 'text', placeholder: 'http://localhost:1234/v1' }) as HTMLInputElement;
+        endpointInput.style.width = '100%';
+        endpointInput.style.padding = '8px';
+        endpointInput.style.marginBottom = '20px';
+        endpointInput.style.border = '1px solid var(--vscode-input-border)';
+        endpointInput.style.borderRadius = '4px';
+        endpointInput.style.background = 'var(--vscode-input-background)';
+        endpointInput.style.color = 'var(--vscode-input-foreground)';
+        endpointInput.style.fontSize = '13px';
+        endpointInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            endpointInput.value = existingModel.endpoint;
+        }
+        pageContainer.appendChild(endpointInput);
+        
+        // Model Identifier
+        const identifierLabel = $('label');
+        identifierLabel.textContent = 'Model Identifier';
+        identifierLabel.style.display = 'block';
+        identifierLabel.style.fontSize = '13px';
+        identifierLabel.style.fontWeight = '600';
+        identifierLabel.style.marginBottom = '8px';
+        identifierLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(identifierLabel);
+        
+        const identifierInput = $('input', { type: 'text', placeholder: 'e.g., gpt-4, llama-3.1-70b' }) as HTMLInputElement;
+        identifierInput.style.width = '100%';
+        identifierInput.style.padding = '8px';
+        identifierInput.style.marginBottom = '20px';
+        identifierInput.style.border = '1px solid var(--vscode-input-border)';
+        identifierInput.style.borderRadius = '4px';
+        identifierInput.style.background = 'var(--vscode-input-background)';
+        identifierInput.style.color = 'var(--vscode-input-foreground)';
+        identifierInput.style.fontSize = '13px';
+        identifierInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            identifierInput.value = existingModel.modelIdentifier;
+        }
+        pageContainer.appendChild(identifierInput);
+        
+        // API Key (optional)
+        const keyLabel = $('label');
+        keyLabel.textContent = 'API Key (optional)';
+        keyLabel.style.display = 'block';
+        keyLabel.style.fontSize = '13px';
+        keyLabel.style.fontWeight = '600';
+        keyLabel.style.marginBottom = '8px';
+        keyLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(keyLabel);
+        
+        const keyInput = $('input', { type: 'password', placeholder: 'Leave empty for local models' }) as HTMLInputElement;
+        keyInput.style.width = '100%';
+        keyInput.style.padding = '8px';
+        keyInput.style.marginBottom = '30px';
+        keyInput.style.border = '1px solid var(--vscode-input-border)';
+        keyInput.style.borderRadius = '4px';
+        keyInput.style.background = 'var(--vscode-input-background)';
+        keyInput.style.color = 'var(--vscode-input-foreground)';
+        keyInput.style.fontSize = '13px';
+        keyInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            keyInput.value = existingModel.apiKey;
+        }
+        pageContainer.appendChild(keyInput);
+        
+        // Update field visibility based on provider type
+        const updateFieldsForProvider = () => {
+            const selectedType = typeSelect.value;
+            
+            if (selectedType === 'LM Studio') {
+                // LM Studio: Show name and endpoint, hide identifier and API key
+                endpointLabel.style.display = 'block';
+                endpointInput.style.display = 'block';
+                identifierLabel.style.display = 'none';
+                identifierInput.style.display = 'none';
+                keyLabel.style.display = 'none';
+                keyInput.style.display = 'none';
+                // Set defaults
+                if (!endpointInput.value) {
+                    endpointInput.value = 'http://localhost:1234/v1';
+                }
+                endpointInput.placeholder = 'http://localhost:1234/v1';
+                endpointLabel.textContent = 'LM Studio Server URL';
+                identifierInput.value = '';
+                keyInput.value = '';
+            } else if (selectedType === 'Ollama') {
+                // Ollama: Show name, endpoint, and model identifier
+                endpointLabel.style.display = 'block';
+                endpointInput.style.display = 'block';
+                identifierLabel.style.display = 'block';
+                identifierInput.style.display = 'block';
+                keyLabel.style.display = 'none';
+                keyInput.style.display = 'none';
+                // Set defaults
+                if (!endpointInput.value) {
+                    endpointInput.value = 'http://localhost:11434';
+                }
+                endpointInput.placeholder = 'http://localhost:11434';
+                endpointLabel.textContent = 'Ollama Server URL';
+                identifierLabel.textContent = 'Model Name';
+                identifierInput.placeholder = 'e.g., llama3.1, mistral, codellama';
+                keyInput.value = '';
+            } else {
+                // OpenAI Compatible API: Show all fields
+                endpointLabel.style.display = 'block';
+                endpointInput.style.display = 'block';
+                identifierLabel.style.display = 'block';
+                identifierInput.style.display = 'block';
+                keyLabel.style.display = 'block';
+                keyInput.style.display = 'block';
+                endpointInput.placeholder = 'https://api.openai.com/v1';
+                endpointLabel.textContent = 'API Endpoint';
+                identifierLabel.textContent = 'Model Identifier';
+                identifierInput.placeholder = 'e.g., gpt-4, gpt-3.5-turbo';
+                keyLabel.textContent = 'API Key';
+            }
+        };
+        
+        typeSelect.onchange = updateFieldsForProvider;
+        updateFieldsForProvider(); // Call initially to set correct visibility
+        
+        // Buttons container
+        const buttonsContainer = $('div');
+        buttonsContainer.style.display = 'flex';
+        buttonsContainer.style.gap = '12px';
+        buttonsContainer.style.justifyContent = 'flex-end';
+        
+        // Cancel button
+        const cancelButton = $('button');
+        cancelButton.textContent = 'Cancel';
+        cancelButton.style.padding = '8px 16px';
+        cancelButton.style.border = '1px solid var(--vscode-input-border)';
+        cancelButton.style.borderRadius = '4px';
+        cancelButton.style.background = 'var(--vscode-input-background)';
+        cancelButton.style.color = 'var(--vscode-foreground)';
+        cancelButton.style.fontSize = '13px';
+        cancelButton.style.cursor = 'pointer';
+        cancelButton.onclick = () => {
+            // Clear the page and return to chat
+            while (this.messagesArea.firstChild) {
+                this.messagesArea.removeChild(this.messagesArea.firstChild);
+            }
+        };
+        buttonsContainer.appendChild(cancelButton);
+        
+        // Save button
+        const saveButton = $('button');
+        saveButton.textContent = isEditing ? 'Save Changes' : 'Add Model';
+        saveButton.style.padding = '8px 16px';
+        saveButton.style.border = 'none';
+        saveButton.style.borderRadius = '4px';
+        saveButton.style.background = 'var(--vscode-button-background)';
+        saveButton.style.color = 'var(--vscode-button-foreground)';
+        saveButton.style.fontSize = '13px';
+        saveButton.style.fontWeight = '600';
+        saveButton.style.cursor = 'pointer';
+        saveButton.onclick = () => {
+            const modelData = {
+                type: typeSelect.value,
+                name: nameInput.value.trim(),
+                endpoint: endpointInput.value.trim(),
+                modelIdentifier: identifierInput.value.trim(),
+                apiKey: keyInput.value.trim()
+            };
+            
+            // Validate required fields based on provider type
+            if (!modelData.name) {
+                this.displayAIMessage('Please enter a Model Name.');
+                return;
+            }
+            
+            if (modelData.type === 'LM Studio') {
+                // LM Studio: Require name and endpoint
+                if (!modelData.endpoint) {
+                    this.displayAIMessage('Please enter the LM Studio Server URL.');
+                    return;
+                }
+                modelData.modelIdentifier = '';
+                modelData.apiKey = '';
+            } else if (modelData.type === 'Ollama') {
+                // Ollama: Require name, endpoint, and model identifier
+                if (!modelData.endpoint) {
+                    this.displayAIMessage('Please enter the Ollama Server URL.');
+                    return;
+                }
+                if (!modelData.modelIdentifier) {
+                    this.displayAIMessage('Please enter the Model Name (e.g., llama3.1, mistral).');
+                    return;
+                }
+                modelData.apiKey = '';
+            } else {
+                // OpenAI Compatible API: Require all fields
+                if (!modelData.endpoint) {
+                    this.displayAIMessage('Please enter the API Endpoint.');
+                    return;
+                }
+                if (!modelData.modelIdentifier) {
+                    this.displayAIMessage('Please enter the Model Identifier.');
+                    return;
+                }
+                if (!modelData.apiKey) {
+                    this.displayAIMessage('Please enter the API Key.');
+                    return;
+                }
+            }
+            
+            if (isEditing && existingModel) {
+                // Update existing model
+                const index = this.customModels.findIndex(m => 
+                    m.name === existingModel.name && 
+                    m.endpoint === existingModel.endpoint
+                );
+                if (index !== -1) {
+                    this.customModels[index] = modelData;
+                    console.log('[AcuxCode] Custom model updated:', modelData);
+                }
+            } else {
+                // Add new model
+                this.customModels.push(modelData);
+                console.log('[AcuxCode] Custom model added:', modelData);
+            }
+            
+            // Persist to storage
+            const PERSIST_SCOPE = StorageScope.PROFILE;
+            this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels), PERSIST_SCOPE, StorageTarget.USER);
+            
+            console.log('[AcuxCode] Total custom models:', this.customModels.length);
+            
+            // Clear the add model page and return to fresh chat
+            while (this.messagesArea.firstChild) {
+                this.messagesArea.removeChild(this.messagesArea.firstChild);
+            }
+        };
+        buttonsContainer.appendChild(saveButton);
+        
+        pageContainer.appendChild(buttonsContainer);
+        this.messagesArea.appendChild(pageContainer);
     }
     
     private updateFilesDisplay(): void {
