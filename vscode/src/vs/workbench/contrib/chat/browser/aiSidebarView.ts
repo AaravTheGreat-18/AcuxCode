@@ -40,6 +40,8 @@ export class AISidebarView extends Disposable {
 	private readonly storageKeyRecentModels = 'acuxcode.chat.recentModels';
 	private readonly storageKeyAutoMode = 'acuxcode.chat.autoMode';
 	private readonly storageKeyCustomModels = 'acuxcode.chat.customModels';
+	private readonly storageKeyReadableMode = 'acuxcode.chat.readableMode';
+	private readableModeEnabled: boolean = false;
 	private loadingIndicatorEl: HTMLElement | undefined;
 	private loadingIndicatorInterval: number | undefined;
 
@@ -206,6 +208,7 @@ export class AISidebarView extends Disposable {
 		const persistState = () => {
 			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
 			this.storageService.store(this.storageKeyAutoMode, this.autoModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyReadableMode, this.readableModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
 			this.storageService.store(this.storageKeyRecentModels, JSON.stringify(this.recentModels), PERSIST_SCOPE, StorageTarget.USER);
 			// Backward-compatible: persist apiKey field as empty to avoid leaking in plain storage
 			this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
@@ -215,7 +218,9 @@ export class AISidebarView extends Disposable {
 			const savedAuto = this.storageService.get(this.storageKeyAutoMode, PERSIST_SCOPE);
 			const savedRecents = this.storageService.get(this.storageKeyRecentModels, PERSIST_SCOPE);
 			const savedCustomModels = this.storageService.get(this.storageKeyCustomModels, PERSIST_SCOPE);
+			const savedReadable = this.storageService.get(this.storageKeyReadableMode, PERSIST_SCOPE);
 			this.autoModeEnabled = savedAuto === '1';
+			this.readableModeEnabled = savedReadable === '1';
 			try {
 				if (savedRecents) {
 					const parsed = JSON.parse(savedRecents);
@@ -356,6 +361,59 @@ export class AISidebarView extends Disposable {
 		};
 		autoContainer.appendChild(autoLabel);
 		autoContainer.appendChild(autoSwitch);
+
+		// Readable mode toggle (improves output formatting)
+		const readableContainer = $('div');
+		readableContainer.style.display = 'flex';
+		readableContainer.style.alignItems = 'center';
+		readableContainer.style.justifyContent = 'space-between';
+		readableContainer.style.padding = '6px 10px 8px 10px';
+		const readableLabel = $('div');
+		readableLabel.textContent = 'Readable';
+		readableLabel.style.fontSize = '12px';
+		readableLabel.style.fontWeight = '600';
+		readableLabel.style.color = 'var(--vscode-foreground)';
+		const readableSwitch = $('button') as HTMLButtonElement;
+		readableSwitch.setAttribute('role', 'switch');
+		readableSwitch.setAttribute('aria-label', 'Readable');
+		readableSwitch.style.width = '36px';
+		readableSwitch.style.height = '22px';
+		readableSwitch.style.minWidth = '36px';
+		readableSwitch.style.border = 'none';
+		readableSwitch.style.margin = '0';
+		readableSwitch.style.padding = '0';
+		readableSwitch.style.borderRadius = '999px';
+		readableSwitch.style.position = 'relative';
+		readableSwitch.style.cursor = 'pointer';
+		readableSwitch.style.outline = 'none';
+		readableSwitch.style.background = 'var(--vscode-input-border)';
+		const readableKnob = $('div');
+		readableKnob.style.position = 'absolute';
+		readableKnob.style.top = '3px';
+		readableKnob.style.left = '3px';
+		readableKnob.style.width = '16px';
+		readableKnob.style.height = '16px';
+		readableKnob.style.borderRadius = '999px';
+		readableKnob.style.background = 'var(--vscode-editor-background)';
+		readableKnob.style.boxShadow = '0 1px 2px rgba(0,0,0,0.25)';
+		readableKnob.style.transition = 'transform 120ms ease, left 120ms ease, background 120ms ease';
+		readableSwitch.appendChild(readableKnob);
+		const setReadableState = (on: boolean) => {
+			readableSwitch.setAttribute('aria-checked', on ? 'true' : 'false');
+			readableSwitch.style.background = on ? 'var(--vscode-button-background)' : 'var(--vscode-input-border)';
+			readableKnob.style.left = on ? '17px' : '3px';
+			readableKnob.style.background = 'var(--vscode-editor-background)';
+		};
+		setReadableState(this.readableModeEnabled);
+		const toggleReadable = () => {
+			this.readableModeEnabled = !this.readableModeEnabled;
+			setReadableState(this.readableModeEnabled);
+			persistState();
+		};
+		readableSwitch.onclick = (e) => { e.preventDefault(); toggleReadable(); };
+		readableSwitch.onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleReadable(); } };
+		readableContainer.appendChild(readableLabel);
+		readableContainer.appendChild(readableSwitch);
 
 		// Search bar
         const searchContainer = $('div');
@@ -1215,6 +1273,9 @@ export class AISidebarView extends Disposable {
             }
             
 			if (aiMessage) {
+				if (this.readableModeEnabled) {
+					aiMessage = this.toReadable(aiMessage);
+				}
 				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
 				this.displayAIMessage(aiMessage);
             } else {
@@ -1297,39 +1358,176 @@ export class AISidebarView extends Disposable {
     }
     
     private displayAIMessage(message: string): void {
-        // Create AI message (no bubble, just paragraph on left)
+        // Create AI message (no bubble, supports IDE-like code blocks)
         const messageContainer = $('div');
         messageContainer.style.display = 'flex';
         messageContainer.style.justifyContent = 'flex-start';
         messageContainer.style.width = '100%';
-        
+
         const messageContent = $('div');
         messageContent.style.maxWidth = '85%';
         messageContent.style.marginLeft = '12px';
         messageContent.style.fontSize = '13px';
         messageContent.style.lineHeight = '1.6';
         messageContent.style.color = 'var(--vscode-foreground)';
-        messageContent.style.whiteSpace = 'pre-wrap';
+        messageContent.style.whiteSpace = 'normal';
         messageContent.style.wordBreak = 'break-word';
         messageContent.style.userSelect = 'text';
         messageContent.style.cursor = 'text';
-        messageContent.textContent = message;
-        
+
+        // Parse fenced code blocks and render text/code segments
+        const segments: Array<{ code: boolean; lang?: string; text: string }> = [];
+        {
+            const regex = /```(\w+)?\n([\s\S]*?)```/g;
+            let lastIndex = 0; let m: RegExpExecArray | null;
+            while ((m = regex.exec(message)) !== null) {
+                if (m.index > lastIndex) {
+                    segments.push({ code: false, text: message.slice(lastIndex, m.index) });
+                }
+                segments.push({ code: true, lang: (m[1] || '').trim() || undefined, text: m[2] });
+                lastIndex = m.index + m[0].length;
+            }
+            if (lastIndex < message.length) {
+                segments.push({ code: false, text: message.slice(lastIndex) });
+            }
+            if (segments.length === 0) {
+                segments.push({ code: false, text: message });
+            }
+        }
+
+        const appendText = (t: string) => {
+            if (!t) { return; }
+            const p = $('div');
+            p.style.whiteSpace = 'pre-wrap';
+            p.style.wordBreak = 'break-word';
+            p.textContent = t;
+            messageContent.appendChild(p);
+        };
+
+        const appendCode = (code: string, lang?: string) => {
+            const wrapper = $('div');
+            wrapper.style.margin = '8px 0';
+            wrapper.style.border = '1px solid var(--vscode-editorWidget-border)';
+            wrapper.style.borderLeft = '3px solid var(--vscode-button-background)';
+            wrapper.style.borderRadius = '6px';
+            wrapper.style.overflow = 'hidden';
+            wrapper.style.background = 'var(--vscode-editor-background)';
+            wrapper.style.boxShadow = 'inset 0 1px 0 rgba(255,255,255,0.03)';
+
+            // Header bar
+            const header = $('div');
+            header.style.display = 'flex';
+            header.style.alignItems = 'center';
+            header.style.justifyContent = 'space-between';
+            header.style.padding = '6px 8px';
+            header.style.background = 'var(--vscode-editorHoverWidget-background)';
+            header.style.color = 'var(--vscode-descriptionForeground)';
+            header.style.borderBottom = '1px solid var(--vscode-editorWidget-border)';
+            header.style.fontSize = '11px';
+
+            const left = $('div');
+            left.style.display = 'flex';
+            left.style.alignItems = 'center';
+            const title = $('span');
+            title.textContent = lang ? `${lang}` : 'code';
+            title.style.fontWeight = '600';
+            title.style.opacity = '0.85';
+            left.appendChild(title);
+
+            header.appendChild(left);
+
+            // Code body
+            const body = $('pre');
+            body.style.margin = '0';
+            body.style.padding = '10px 12px';
+            body.style.whiteSpace = 'pre';
+            body.style.overflow = 'auto';
+            body.style.fontFamily = "var(--monaco-monospace-font, Menlo, Monaco, 'Courier New', monospace)";
+            body.style.fontSize = '12px';
+            body.style.background = 'var(--vscode-editor-background)';
+            body.style.color = 'var(--vscode-editor-foreground)';
+            const codeEl = $('code');
+            codeEl.textContent = code;
+            codeEl.style.color = 'var(--vscode-terminal-ansiCyan)';
+            body.appendChild(codeEl);
+
+            wrapper.appendChild(header);
+            wrapper.appendChild(body);
+            messageContent.appendChild(wrapper);
+        };
+
+        for (const seg of segments) {
+            if (!seg.code) {
+                appendText(seg.text);
+            } else {
+                appendCode(seg.text, seg.lang);
+            }
+        }
+
         messageContainer.appendChild(messageContent);
         this.messagesArea.appendChild(messageContainer);
-        
+
         // Scroll to bottom
         this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
     }
 
+	private toReadable(text: string): string {
+		// Lightweight readability + concision heuristics while preserving code blocks
+		// 1) Split into segments to avoid touching fenced code blocks
+		const segments: { code: boolean; text: string }[] = [];
+		{
+			const parts = text.split(/```/);
+			for (let i = 0; i < parts.length; i++) {
+				segments.push({ code: i % 2 === 1, text: parts[i] });
+			}
+		}
+		const cleaned: string[] = [];
+		for (const seg of segments) {
+			if (seg.code) {
+				cleaned.push('```' + seg.text + '```');
+				continue;
+			}
+			let s = seg.text;
+			// Trim trailing spaces and collapse excessive blank lines
+			s = s.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n');
+			// Remove filler/openers commonly produced by LLMs
+			s = s.replace(/^\s*here(?:'|’)s a breakdown.*$/gim, '')
+				 .replace(/^\s*in essence.*$/gim, '')
+				 .replace(/^\s*this file .* is.*responsible.*$/gim, '')
+				 .replace(/^\s*this is a common pattern.*$/gim, '')
+				 .replace(/^\s*after this file is executed.*$/gim, '')
+				 .replace(/^\s*so,?\s+/gim, '')
+				 .replace(/^\s*overall,?\s+/gim, '');
+			// Convert simple ordered list to bullets for compactness
+			s = s.replace(/^(\s*)\d+\.\s+/gm, '$1- ');
+			// Ensure blank line before bullets
+			s = s.replace(/([^\n])\n(-\s)/g, '$1\n\n$2');
+			// Ensure code fences have blank lines before
+			s = s.replace(/([^\n])\n```/g, '$1\n\n```');
+			cleaned.push(s);
+		}
+		let out = cleaned.join('');
+		// Final tidy: collapse triple+ newlines
+		out = out.replace(/\n{3,}/g, '\n\n');
+		return out.trim();
+	}
+
 	private showLoadingIndicator(): void {
 		this.hideLoadingIndicator();
 		const phrases = [
-			'Thinking…',
-			'Planning…',
-			'Aligning the pixels…',
-			'Brewing ideas…',
-			'Crunching context…'
+			'Thinking',
+			'Planning',
+			'Analyzing',
+			'Parsing input',
+			'Mapping context',
+			'Drafting answer',
+			'Refining steps',
+			'Aligning the pixels',
+			'Brewing ideas',
+			'Crunching context',
+			'Fetching braincells',
+			'Counting semicolons',
+			'Optimizing vibes'
 		];
 		const container = $('div');
 		container.style.display = 'flex';
@@ -1344,17 +1542,27 @@ export class AISidebarView extends Disposable {
 		content.style.opacity = '0.9';
 		content.style.userSelect = 'none';
 		let i = 0;
-		content.textContent = phrases[i % phrases.length];
+		let dots = 0;
+		const render = () => {
+			const base = phrases[i % phrases.length];
+			const suffix = '.'.repeat(dots % 4); // '', '.', '..', '...'
+			content.textContent = `${base}${suffix}`;
+		};
+		render();
+		let tick = 0;
 		this.loadingIndicatorInterval = window.setInterval(() => {
-			i = (i + 1) % phrases.length;
-			content.textContent = phrases[i];
-		}, 1200);
+			tick += 1;
+			dots = tick % 4; // dots animate every 500ms
+			if (tick % 3 === 0) { // change phrase every 1.5s (3 * 500ms)
+				i = (i + 1) % phrases.length;
+			}
+			render();
+		}, 500);
 		container.appendChild(content);
 		this.messagesArea.appendChild(container);
 		this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
 		this.loadingIndicatorEl = container;
 	}
-
 	private async hideLoadingIndicatorAfterMin(startAt: number): Promise<void> {
 		const minMs = 1000; // minimum 1s
 		const elapsed = Date.now() - startAt;
