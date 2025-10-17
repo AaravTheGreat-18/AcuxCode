@@ -17,6 +17,11 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
 import { ResourceLabels } from '../../../browser/labels.js';
 import * as event from '../../../../base/common/event.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IRequestService, asJson, asText, isSuccess } from '../../../../platform/request/common/request.js';
+import { IHeaders } from '../../../../base/parts/request/common/request.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 
 const $ = dom.$;
 
@@ -35,12 +40,17 @@ export class AISidebarView extends Disposable {
 	private readonly storageKeyRecentModels = 'acuxcode.chat.recentModels';
 	private readonly storageKeyAutoMode = 'acuxcode.chat.autoMode';
 	private readonly storageKeyCustomModels = 'acuxcode.chat.customModels';
+	private loadingIndicatorEl: HTMLElement | undefined;
+	private loadingIndicatorInterval: number | undefined;
 
     constructor(
         @IQuickInputService private readonly quickInputService: IQuickInputService,
         @IChatWidgetService private readonly chatWidgetService: IChatWidgetService,
         @IInstantiationService private readonly instantiationService: IInstantiationService,
-        @IStorageService private readonly storageService: IStorageService
+        @IStorageService private readonly storageService: IStorageService,
+        @IRequestService private readonly requestService: IRequestService,
+		@ISecretStorageService private readonly secretStorageService: ISecretStorageService,
+		@IFileService private readonly fileService: IFileService
     ) {
         super();
         console.log('[AcuxCode] AISidebarView constructor called');
@@ -197,7 +207,8 @@ export class AISidebarView extends Disposable {
 			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
 			this.storageService.store(this.storageKeyAutoMode, this.autoModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
 			this.storageService.store(this.storageKeyRecentModels, JSON.stringify(this.recentModels), PERSIST_SCOPE, StorageTarget.USER);
-			this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels), PERSIST_SCOPE, StorageTarget.USER);
+			// Backward-compatible: persist apiKey field as empty to avoid leaking in plain storage
+			this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
 		};
 		const loadPersistedState = (all: ModelInfo[]) => {
 			const savedModel = this.storageService.get(this.storageKeySelectedModel, PERSIST_SCOPE);
@@ -215,7 +226,14 @@ export class AISidebarView extends Disposable {
 				if (savedCustomModels) {
 					const parsed = JSON.parse(savedCustomModels);
 					if (Array.isArray(parsed)) {
-						this.customModels = parsed;
+						// Back-compat: if apiKey is present (old versions), keep in memory but never re-persist
+						this.customModels = parsed.map((m: any) => ({
+							type: typeof m.type === 'string' ? m.type : 'OpenAI Compatible API',
+							name: String(m.name || ''),
+							endpoint: String(m.endpoint || ''),
+							modelIdentifier: String(m.modelIdentifier || ''),
+							apiKey: typeof m.apiKey === 'string' ? m.apiKey : ''
+						}));
 					}
 				}
 			} catch { /* ignore parse errors */ }
@@ -231,6 +249,10 @@ export class AISidebarView extends Disposable {
 		// Set default selected model
 		this.selectedModel = 'Gemini 2.0 Flash';
 		loadPersistedState(availableModels);
+		// Prefer a custom model if available and none is selected
+		if (!this.customModels.some(m => m.name === this.selectedModel) && this.customModels.length > 0) {
+			this.selectedModel = this.customModels[0].name;
+		}
 		const setButtonLabel = () => {
 			modelButton.textContent = '';
 			if (this.autoModeEnabled) {
@@ -556,9 +578,11 @@ export class AISidebarView extends Disposable {
 							const index = this.customModels.findIndex(m => m.name === model.name && m.endpoint === model.endpoint);
 							if (index !== -1) {
 								this.customModels.splice(index, 1);
-								// Persist to storage
+								// Persist to storage (non-sensitive)
 								const PERSIST_SCOPE = StorageScope.PROFILE;
-								this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels), PERSIST_SCOPE, StorageTarget.USER);
+								this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
+								// Delete associated secret
+								(async () => { try { await this.secretStorageService.delete(`acuxcode.customModels.${model.name}@${model.endpoint}`); } catch {} })();
 								// Re-render list
 								renderList(searchInput.value);
 								console.log('[AcuxCode] Custom model deleted:', model.name);
@@ -966,8 +990,16 @@ export class AISidebarView extends Disposable {
         this.attachedFiles = [];
         this.updateFilesDisplay();
         
-        // Send API request
-        this.sendAIRequest(message, filesSnapshot);
+		// If no valid custom model is selected but exactly one exists, auto-select it
+		if (!this.customModels.some(m => m.name === this.selectedModel) && this.customModels.length === 1) {
+			this.selectedModel = this.customModels[0].name;
+			const PERSIST_SCOPE = StorageScope.PROFILE;
+			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
+			console.log('[AcuxCode] Auto-selected the only custom model:', this.selectedModel);
+		}
+
+		// Send API request
+		this.sendAIRequest(message, filesSnapshot);
         
         console.log('[AcuxCode] Input cleared, ready for next message');
     }
@@ -978,72 +1010,261 @@ export class AISidebarView extends Disposable {
         // Find the custom model configuration if it's a custom model
         const customModel = this.customModels.find(m => m.name === this.selectedModel);
         
-        if (!customModel) {
-            // TODO: Handle built-in models (will need backend API endpoint)
-            console.log('[AcuxCode] Built-in model selected, backend integration needed');
-            this.displayAIMessage('Built-in models require backend integration. Please add a custom model or configure the backend API.');
-            return;
-        }
+		if (!customModel) {
+			const hasCustom = this.customModels.length > 0;
+			const hint = hasCustom ? 'Please select one of your models from the dropdown.' : 'Click "+ Add Model" to add an OpenAI-compatible or LM Studio model (no API key needed for LM Studio).';
+			console.log('[AcuxCode] No custom model selected; cannot send request');
+			this.displayAIMessage('No custom model selected. ' + hint);
+			return;
+		}
         
-        console.log('[AcuxCode] Using custom model:', customModel.name);
+		console.log('[AcuxCode] Using custom model:', customModel.name);
         console.log('[AcuxCode] Endpoint:', customModel.endpoint);
         console.log('[AcuxCode] Model ID:', customModel.modelIdentifier);
         
-        try {
+		// Show loading indicator with minimum dwell time
+		const loadingStartAt = Date.now();
+		this.showLoadingIndicator();
+		
+		try {
             // Prepare the request body (OpenAI-compatible format)
-            const requestBody = {
-                model: customModel.modelIdentifier,
+			let requestBody: any = {
+                model: customModel.modelIdentifier || 'default',
                 messages: [
                     {
                         role: 'user',
-                        content: message
+						content: message
                     }
                 ],
                 stream: false
             };
+
+			// Append attached files (up to ~1MB per file). Oversized -> warn and skip.
+			if (files && files.length > 0) {
+				const MAX_PER_FILE_BYTES = 1 * 1024 * 1024; // 1MB
+				let filesSection = '';
+				for (const f of files) {
+					try {
+						const stat = await this.fileService.stat(f.uri);
+						if (typeof stat.size === 'number' && stat.size > MAX_PER_FILE_BYTES) {
+							// Ephemeral warning message
+							this.displayAIMessage(`Warning: ${f.name} is too big for the model input (>${MAX_PER_FILE_BYTES} bytes). Skipped.`);
+							continue;
+						}
+						const content = (await this.fileService.readFile(f.uri)).value.toString();
+						filesSection += `\n\n[File: ${f.name}]\n\n\`\`\`\n${content}\n\`\`\``;
+					} catch (err) {
+						this.displayAIMessage(`Warning: Failed to read ${f.name}. Skipped.`);
+					}
+				}
+				if (filesSection) {
+					requestBody.messages[0].content = `${requestBody.messages[0].content}${filesSection}`;
+				}
+			}
             
-            // Prepare headers
-            const headers: Record<string, string> = {
-                'Content-Type': 'application/json'
-            };
+			// Prepare headers
+			const headers: Record<string, string> = {
+				'Content-Type': 'application/json',
+				'Accept': 'application/json'
+			};
             
-            // Add API key if provided
-            if (customModel.apiKey) {
-                headers['Authorization'] = `Bearer ${customModel.apiKey}`;
-            }
+			// Load API key from secret storage
+			let resolvedApiKey: string | undefined;
+			try {
+				resolvedApiKey = await this.secretStorageService.get(`acuxcode.customModels.${customModel.name}@${customModel.endpoint}`);
+			} catch { /* ignore */ }
+			if (!resolvedApiKey && customModel.apiKey) {
+				resolvedApiKey = customModel.apiKey; // backward-compat fallback for older saved models
+			}
+			// Global fallback: host-level and generic OpenAI-compatible key
+			if (!resolvedApiKey) {
+				try {
+					const host = (() => { try { return new URL(customModel.endpoint).hostname; } catch { return ''; } })();
+					resolvedApiKey = await this.secretStorageService.get(`acuxcode.global.host.${host}`) || await this.secretStorageService.get('acuxcode.global.openai_compatible') || undefined;
+				} catch { /* ignore */ }
+			}
+			// Add API key (Authorization by default)
+			if (resolvedApiKey) {
+				headers['Authorization'] = `Bearer ${resolvedApiKey}`;
+			}
             
-            console.log('[AcuxCode] Sending request to:', `${customModel.endpoint}/chat/completions`);
+			// Determine the correct endpoint based on provider type
+			let apiUrl = customModel.endpoint;
+			const ensureTrailing = (base: string, segment: string) => base.endsWith(segment) ? base : `${base}${segment}`;
+			const hasV1 = (url: string) => /\/v1(\/|$)/.test(url);
+            if (customModel.type === 'Ollama') {
+                apiUrl = `${customModel.endpoint}/api/generate`;
+                // Ollama uses different format
+                requestBody.model = customModel.modelIdentifier;
+                requestBody.prompt = message;
+                delete requestBody.messages;
+			} else if ((customModel.endpoint || '').toLowerCase().includes('openai.azure.com')) {
+				// Azure OpenAI: use api-key header, Azure deployments path, remove model from body
+				if (resolvedApiKey) {
+					delete headers['Authorization'];
+					headers['api-key'] = resolvedApiKey;
+				}
+				const root = customModel.endpoint.replace(/\/$/, '');
+				const hasApiVersion = /[?&]api-version=/.test(root);
+				const apiVersion = '2024-02-15-preview';
+				if (/\/openai\/deployments\//.test(root)) {
+					apiUrl = hasApiVersion ? root : `${root}${root.includes('?') ? '&' : '?'}api-version=${apiVersion}`;
+				} else {
+					const dep = encodeURIComponent(customModel.modelIdentifier || 'deployment');
+					apiUrl = `${root}/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`;
+				}
+				delete requestBody.model;
+			} else if (customModel.type === 'LM Studio') {
+				// LM Studio exposes OpenAI-compatible API, usually at /v1
+				const base = hasV1(customModel.endpoint) ? customModel.endpoint : ensureTrailing(customModel.endpoint.replace(/\/$/, ''), '/v1');
+				apiUrl = `${base}/chat/completions`;
+			} else {
+				// OpenAI Compatible API: ensure /v1 prefix if missing
+				const base = hasV1(customModel.endpoint) ? customModel.endpoint : ensureTrailing(customModel.endpoint.replace(/\/$/, ''), '/v1');
+				apiUrl = `${base}/chat/completions`;
+			}
             
-            // Make the API request
-            const response = await fetch(`${customModel.endpoint}/chat/completions`, {
-                method: 'POST',
-                headers: headers,
-                body: JSON.stringify(requestBody)
-            });
+			// Provider-specific header tweaks (OpenRouter Browser key support)
+			try {
+				const lowerEndpoint = (customModel.endpoint || '').toLowerCase();
+				if (lowerEndpoint.includes('openrouter.ai')) {
+					// Allowed custom headers per OpenRouter docs; keep minimal to avoid preflight issues
+					if (!headers['HTTP-Referer']) {
+						headers['HTTP-Referer'] = 'https://acuxcode.local';
+					}
+					if (!headers['X-Title']) {
+						headers['X-Title'] = 'AcuxCode';
+					}
+				}
+			} catch { /* ignore */ }
+
+			console.log('[AcuxCode] Sending request to:', apiUrl);
+			console.log('[AcuxCode] Request body:', JSON.stringify(requestBody, null, 2));
+			try {
+				const masked: Record<string, string> = { ...headers } as any;
+				if (masked['Authorization']) masked['Authorization'] = 'Bearer ••••••••';
+				if (masked['api-key']) masked['api-key'] = '••••••••';
+				if (masked['x-api-key']) masked['x-api-key'] = '••••••••';
+				console.log('[AcuxCode] Headers:', masked);
+			} catch { /* ignore */ }
+
+			// Use VS Code request service to avoid CORS in desktop
+			const reqHeaders: IHeaders = { ...headers };
+			const ctx = await this.requestService.request({ type: 'POST', url: apiUrl, headers: reqHeaders, data: JSON.stringify(requestBody), timeout: 30000 }, CancellationToken.None);
+			if (!isSuccess(ctx)) {
+				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+				const statusCode = ctx.res.statusCode ?? 0;
+				const rawBody = (await asText(ctx)) ?? '';
+				let parsed: any | undefined;
+				try { parsed = rawBody ? JSON.parse(rawBody) : undefined; } catch { /* not JSON */ }
+				const headersObj = ctx.res.headers || {};
+				const requestId = headersObj['x-request-id']
+					|| headersObj['x-ms-request-id']
+					|| headersObj['x-openai-request-id']
+					|| headersObj['request-id']
+					|| undefined;
+				const wwwAuth = headersObj['www-authenticate'] as string | undefined;
+
+				let providerError = '';
+				if (parsed) {
+					const err = (parsed.error ?? parsed.errors ?? parsed);
+					if (typeof err === 'string') {
+						providerError = err;
+					} else if (err && typeof err === 'object') {
+						providerError = err.message || err.detail || err.error || '';
+						if (!providerError && err.innererror && typeof err.innererror === 'object') {
+							providerError = err.innererror.message || err.innererror.detail || '';
+						}
+					}
+				}
+
+				let errorMessage = '';
+				errorMessage += `Request failed\n\n`;
+				errorMessage += `Status: ${statusCode}\n`;
+				errorMessage += `URL: ${apiUrl}\n`;
+				errorMessage += `Provider: ${customModel.type}\n`;
+				errorMessage += `Model: ${customModel.modelIdentifier}\n`;
+				if (requestId) { errorMessage += `Request ID: ${requestId}\n`; }
+				if (wwwAuth) { errorMessage += `WWW-Authenticate: ${wwwAuth}\n`; }
+
+				if (providerError) {
+					errorMessage += `\nError: ${providerError}\n`;
+				} else if (rawBody) {
+					const bodyPreview = rawBody;
+					errorMessage += `\nBody:\n${bodyPreview}\n`;
+				}
+
+				this.displayAIMessage(errorMessage);
+				return;
+			}
+
+			const data = await asJson<any>(ctx);
+			console.log('[AcuxCode] API response received:', data);
             
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error('[AcuxCode] API request failed:', response.status, errorText);
-                this.displayAIMessage(`Error: API request failed with status ${response.status}\n\n${errorText}`);
-                return;
-            }
+            // Extract the response message based on provider type
+            let aiMessage: string | undefined;
             
-            const data = await response.json();
-            console.log('[AcuxCode] API response received:', data);
-            
-            // Extract the response message
-            if (data.choices && data.choices.length > 0 && data.choices[0].message) {
-                const aiMessage = data.choices[0].message.content;
-                this.displayAIMessage(aiMessage);
+            if (customModel.type === 'Ollama') {
+                // Ollama format
+                aiMessage = data.response;
             } else {
-                console.error('[AcuxCode] Unexpected response format:', data);
-                this.displayAIMessage('Error: Unexpected response format from API');
+                // OpenAI format (LM Studio and OpenAI Compatible API)
+                if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+                    aiMessage = data.choices[0].message.content;
+                }
             }
             
-        } catch (error) {
-            console.error('[AcuxCode] API request error:', error);
-            this.displayAIMessage(`Error: Failed to connect to API\n\n${error instanceof Error ? error.message : String(error)}`);
-        }
+			if (aiMessage) {
+				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+				this.displayAIMessage(aiMessage);
+            } else {
+				console.error('[AcuxCode] Unexpected response format:', data);
+				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+				this.displayAIMessage('Error: Unexpected response format from API\n\n' + JSON.stringify(data, null, 2));
+            }
+            
+		} catch (error) {
+			await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+			console.error('[AcuxCode] API request error:', error);
+			let lines: string[] = [];
+			lines.push('Request error');
+			lines.push('');
+			lines.push(`Provider: ${customModel.type}`);
+			lines.push(`Model: ${customModel.modelIdentifier}`);
+			lines.push(`Endpoint: ${customModel.endpoint}`);
+			lines.push('');
+			if (error instanceof Error) {
+				lines.push(`Name: ${error.name}`);
+				if (error.message) { lines.push(`Message: ${error.message}`); }
+				if (error.stack) { lines.push(`\nStack:\n${error.stack}`); }
+				try {
+					const raw: any = { name: error.name, message: error.message, stack: error.stack };
+					// Include non-enumerable properties
+					for (const key of Object.getOwnPropertyNames(error)) {
+						(raw as any)[key] = (error as any)[key];
+					}
+					const seen = new WeakSet();
+					const json = JSON.stringify(raw, (k, v) => {
+						if (typeof v === 'object' && v !== null) {
+							if (seen.has(v)) { return '[Circular]'; }
+							seen.add(v);
+						}
+						return v;
+					}, 2);
+					lines.push(`\nRaw error (JSON):\n${json}`);
+				} catch { /* ignore */ }
+			} else {
+				lines.push(String(error));
+			}
+			// Heuristic hints
+			const msg = error instanceof Error ? (error.message || '') : String(error || '');
+			const lower = msg.toLowerCase();
+			if (lower.includes('fetch') || lower.includes('network') || lower.includes('cors')) {
+				lines.push('');
+				lines.push('Hint: This often indicates a CORS or network issue.');
+			}
+			this.displayAIMessage(lines.join('\n'));
+		}
     }
     
     private displayUserMessage(message: string): void {
@@ -1064,6 +1285,8 @@ export class AISidebarView extends Disposable {
         messageContent.style.color = 'var(--vscode-foreground)';
         messageContent.style.whiteSpace = 'pre-wrap';
         messageContent.style.wordBreak = 'break-word';
+        messageContent.style.userSelect = 'text';
+        messageContent.style.cursor = 'text';
         messageContent.textContent = message;
         
         messageBubble.appendChild(messageContent);
@@ -1088,6 +1311,8 @@ export class AISidebarView extends Disposable {
         messageContent.style.color = 'var(--vscode-foreground)';
         messageContent.style.whiteSpace = 'pre-wrap';
         messageContent.style.wordBreak = 'break-word';
+        messageContent.style.userSelect = 'text';
+        messageContent.style.cursor = 'text';
         messageContent.textContent = message;
         
         messageContainer.appendChild(messageContent);
@@ -1096,6 +1321,59 @@ export class AISidebarView extends Disposable {
         // Scroll to bottom
         this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
     }
+
+	private showLoadingIndicator(): void {
+		this.hideLoadingIndicator();
+		const phrases = [
+			'Thinking…',
+			'Planning…',
+			'Aligning the pixels…',
+			'Brewing ideas…',
+			'Crunching context…'
+		];
+		const container = $('div');
+		container.style.display = 'flex';
+		container.style.justifyContent = 'flex-start';
+		container.style.width = '100%';
+		const content = $('div');
+		content.style.maxWidth = '85%';
+		content.style.marginLeft = '12px';
+		content.style.fontSize = '12px';
+		content.style.lineHeight = '1.5';
+		content.style.color = 'var(--vscode-descriptionForeground)';
+		content.style.opacity = '0.9';
+		content.style.userSelect = 'none';
+		let i = 0;
+		content.textContent = phrases[i % phrases.length];
+		this.loadingIndicatorInterval = window.setInterval(() => {
+			i = (i + 1) % phrases.length;
+			content.textContent = phrases[i];
+		}, 1200);
+		container.appendChild(content);
+		this.messagesArea.appendChild(container);
+		this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+		this.loadingIndicatorEl = container;
+	}
+
+	private async hideLoadingIndicatorAfterMin(startAt: number): Promise<void> {
+		const minMs = 1000; // minimum 1s
+		const elapsed = Date.now() - startAt;
+		if (elapsed < minMs) {
+			await new Promise(res => setTimeout(res, minMs - elapsed));
+		}
+		this.hideLoadingIndicator();
+	}
+
+	private hideLoadingIndicator(): void {
+		if (this.loadingIndicatorInterval !== undefined) {
+			window.clearInterval(this.loadingIndicatorInterval);
+			this.loadingIndicatorInterval = undefined;
+		}
+		if (this.loadingIndicatorEl && this.loadingIndicatorEl.parentElement) {
+			this.loadingIndicatorEl.parentElement.removeChild(this.loadingIndicatorEl);
+		}
+		this.loadingIndicatorEl = undefined;
+	}
     
     private showAddModelPage(existingModel?: { type: string; name: string; endpoint: string; modelIdentifier: string; apiKey: string }): void {
         // Clear messages area and show add model configuration page
@@ -1248,6 +1526,13 @@ export class AISidebarView extends Disposable {
         keyInput.style.boxSizing = 'border-box';
         if (existingModel) {
             keyInput.value = existingModel.apiKey;
+            // Load API key from secret storage when editing
+            (async () => {
+                try {
+                    const sk = await this.secretStorageService.get(`acuxcode.customModels.${existingModel.name}@${existingModel.endpoint}`);
+                    if (sk) { keyInput.value = sk; }
+                } catch { /* ignore */ }
+            })();
         }
         pageContainer.appendChild(keyInput);
         
@@ -1312,6 +1597,12 @@ export class AISidebarView extends Disposable {
         buttonsContainer.style.display = 'flex';
         buttonsContainer.style.gap = '12px';
         buttonsContainer.style.justifyContent = 'flex-end';
+
+		// Test Connection status label
+		const testStatus = $('div');
+		testStatus.style.marginTop = '8px';
+		testStatus.style.fontSize = '12px';
+		testStatus.style.color = 'var(--vscode-descriptionForeground)';
         
         // Cancel button
         const cancelButton = $('button');
@@ -1331,7 +1622,92 @@ export class AISidebarView extends Disposable {
         };
         buttonsContainer.appendChild(cancelButton);
         
-        // Save button
+		// Test Connection button
+		const testButton = $('button');
+		testButton.textContent = 'Test Connection';
+		testButton.style.padding = '8px 12px';
+		testButton.style.border = '1px solid var(--vscode-input-border)';
+		testButton.style.borderRadius = '4px';
+		testButton.style.background = 'var(--vscode-input-background)';
+		testButton.style.color = 'var(--vscode-foreground)';
+		testButton.style.fontSize = '13px';
+		testButton.style.cursor = 'pointer';
+		testButton.onclick = async () => {
+			try {
+				testStatus.textContent = 'Testing...';
+				const dataForTest = {
+					type: typeSelect.value,
+					name: nameInput.value.trim() || '(unsaved)',
+					endpoint: endpointInput.value.trim(),
+					modelIdentifier: identifierInput.value.trim(),
+					apiKey: keyInput.value.trim()
+				};
+				// Build request body and headers
+				const reqBody = {
+					model: dataForTest.modelIdentifier || 'default',
+					messages: [{ role: 'user', content: 'hello' }],
+					stream: false
+				} as any;
+				const headers: Record<string, string> = {
+					'Content-Type': 'application/json',
+					'Accept': 'application/json'
+				};
+				let apiUrl = dataForTest.endpoint;
+				const ensureTrailing = (base: string, segment: string) => base.endsWith(segment) ? base : `${base}${segment}`;
+				const hasV1 = (url: string) => /\/v1(\/|$)/.test(url);
+				const endpointLower = (dataForTest.endpoint || '').toLowerCase();
+				if (dataForTest.apiKey) {
+					headers['Authorization'] = `Bearer ${dataForTest.apiKey}`;
+				}
+				if (dataForTest.type === 'Ollama') {
+					apiUrl = `${dataForTest.endpoint.replace(/\/$/, '')}/api/generate`;
+					reqBody.model = dataForTest.modelIdentifier;
+					reqBody.prompt = 'hello';
+					delete reqBody.messages;
+				} else if (endpointLower.includes('openai.azure.com')) {
+					if (dataForTest.apiKey) {
+						delete headers['Authorization'];
+						headers['api-key'] = dataForTest.apiKey;
+					}
+					const root = dataForTest.endpoint.replace(/\/$/, '');
+					const hasApiVersion = /[?&]api-version=/.test(root);
+					const apiVersion = '2024-02-15-preview';
+					if (/\/openai\/deployments\//.test(root)) {
+						apiUrl = hasApiVersion ? root : `${root}${root.includes('?') ? '&' : '?'}api-version=${apiVersion}`;
+					} else {
+						const dep = encodeURIComponent(dataForTest.modelIdentifier || 'deployment');
+						apiUrl = `${root}/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`;
+					}
+					delete reqBody.model;
+				} else if (dataForTest.type === 'LM Studio') {
+					const base = hasV1(dataForTest.endpoint) ? dataForTest.endpoint : ensureTrailing(dataForTest.endpoint.replace(/\/$/, ''), '/v1');
+					apiUrl = `${base}/chat/completions`;
+				} else {
+					const base = hasV1(dataForTest.endpoint) ? dataForTest.endpoint : ensureTrailing(dataForTest.endpoint.replace(/\/$/, ''), '/v1');
+					apiUrl = `${base}/chat/completions`;
+				}
+				// OpenRouter headers (minimal)
+				if (endpointLower.includes('openrouter.ai')) {
+					headers['HTTP-Referer'] = 'https://acuxcode.local';
+					headers['X-Title'] = 'AcuxCode';
+				}
+				const ctx = await this.requestService.request({ type: 'POST', url: apiUrl, headers: headers as any, data: JSON.stringify(reqBody), timeout: 15000 }, CancellationToken.None);
+				if (isSuccess(ctx)) {
+					testStatus.style.color = 'var(--vscode-terminal-ansiGreen)';
+					testStatus.textContent = `Success: ${ctx.res.statusCode}`;
+				} else {
+					const body = (await asText(ctx)) ?? '';
+					testStatus.style.color = 'var(--vscode-errorForeground)';
+					testStatus.textContent = `Failed: ${ctx.res.statusCode} ${body.slice(0, 300)}`;
+				}
+			} catch (err) {
+				testStatus.style.color = 'var(--vscode-errorForeground)';
+				testStatus.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+			}
+		};
+		buttonsContainer.appendChild(testButton);
+
+		// Save button
         const saveButton = $('button');
         saveButton.textContent = isEditing ? 'Save Changes' : 'Add Model';
         saveButton.style.padding = '8px 16px';
@@ -1342,7 +1718,7 @@ export class AISidebarView extends Disposable {
         saveButton.style.fontSize = '13px';
         saveButton.style.fontWeight = '600';
         saveButton.style.cursor = 'pointer';
-        saveButton.onclick = () => {
+		saveButton.onclick = () => {
             const modelData = {
                 type: typeSelect.value,
                 name: nameInput.value.trim(),
@@ -1392,7 +1768,7 @@ export class AISidebarView extends Disposable {
                 }
             }
             
-            if (isEditing && existingModel) {
+			if (isEditing && existingModel) {
                 // Update existing model
                 const index = this.customModels.findIndex(m => 
                     m.name === existingModel.name && 
@@ -1402,26 +1778,48 @@ export class AISidebarView extends Disposable {
                     this.customModels[index] = modelData;
                     console.log('[AcuxCode] Custom model updated:', modelData);
                 }
+				// If name/endpoint changed, remove old secret
+				if (existingModel.name !== modelData.name || existingModel.endpoint !== modelData.endpoint) {
+					(async () => { try { await this.secretStorageService.delete(`acuxcode.customModels.${existingModel.name}@${existingModel.endpoint}`); } catch {} })();
+				}
             } else {
                 // Add new model
                 this.customModels.push(modelData);
                 console.log('[AcuxCode] Custom model added:', modelData);
             }
             
-            // Persist to storage
+            // Persist to storage (non-sensitive)
             const PERSIST_SCOPE = StorageScope.PROFILE;
-            this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels), PERSIST_SCOPE, StorageTarget.USER);
+            this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
+
+            // Persist API key to secret storage
+            const secretKeyId = `acuxcode.customModels.${modelData.name}@${modelData.endpoint}`;
+            (async () => {
+                try {
+                    if (modelData.apiKey) {
+                        await this.secretStorageService.set(secretKeyId, modelData.apiKey);
+                    } else {
+                        await this.secretStorageService.delete(secretKeyId);
+                    }
+                } catch { /* ignore secret storage errors */ }
+            })();
             
             console.log('[AcuxCode] Total custom models:', this.customModels.length);
             
-            // Clear the add model page and return to fresh chat
-            while (this.messagesArea.firstChild) {
-                this.messagesArea.removeChild(this.messagesArea.firstChild);
-            }
+			// Auto-select the just-saved model and persist
+			this.selectedModel = modelData.name;
+			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
+			console.log('[AcuxCode] Auto-selected saved model:', this.selectedModel);
+			
+			// Clear the add model page and return to fresh chat
+			while (this.messagesArea.firstChild) {
+				this.messagesArea.removeChild(this.messagesArea.firstChild);
+			}
         };
         buttonsContainer.appendChild(saveButton);
         
-        pageContainer.appendChild(buttonsContainer);
+		pageContainer.appendChild(buttonsContainer);
+		pageContainer.appendChild(testStatus);
         this.messagesArea.appendChild(pageContainer);
     }
     
