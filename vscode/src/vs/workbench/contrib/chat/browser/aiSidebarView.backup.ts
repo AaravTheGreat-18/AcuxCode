@@ -1,0 +1,2100 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import * as dom from '../../../../base/browser/dom.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { URI } from '../../../../base/common/uri.js';
+import { basename } from '../../../../base/common/path.js';
+import { IQuickInputService, IQuickPickItemWithResource } from '../../../../platform/quickinput/common/quickInput.js';
+import { AnythingQuickAccessProviderRunOptions } from '../../../../platform/quickinput/common/quickAccess.js';
+import { AbstractGotoSymbolQuickAccessProvider, IGotoSymbolQuickPickItem } from '../../../../editor/contrib/quickAccess/browser/gotoSymbolQuickAccess.js';
+import { AnythingQuickAccessProvider } from '../../search/browser/anythingQuickAccess.js';
+import { SymbolsQuickAccessProvider } from '../../search/browser/symbolsQuickAccess.js';
+import { IChatWidgetService } from './chat.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { ResourceLabels } from '../../../browser/labels.js';
+import * as event from '../../../../base/common/event.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IRequestService, asJson, asText, isSuccess } from '../../../../platform/request/common/request.js';
+import { IHeaders } from '../../../../base/parts/request/common/request.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+
+const $ = dom.$;
+
+export class AISidebarView extends Disposable {
+    private container!: HTMLElement;
+    private attachedFiles: Array<{ name: string; uri: URI }> = [];
+    private filesDisplayArea!: HTMLElement;
+    private resourceLabels!: ResourceLabels;
+    private inputElement!: HTMLTextAreaElement;
+    private messagesArea!: HTMLElement;
+    private selectedModel: string = 'GPT-4';
+	private autoModeEnabled: boolean = false;
+	private recentModels: string[] = [];
+	private customModels: Array<{ type: string; name: string; endpoint: string; modelIdentifier: string; apiKey: string }> = [];
+	private readonly storageKeySelectedModel = 'acuxcode.chat.selectedModel';
+	private readonly storageKeyRecentModels = 'acuxcode.chat.recentModels';
+	private readonly storageKeyAutoMode = 'acuxcode.chat.autoMode';
+	private readonly storageKeyCustomModels = 'acuxcode.chat.customModels';
+	private readonly storageKeyReadableMode = 'acuxcode.chat.readableMode';
+	private readableModeEnabled: boolean = false;
+	private loadingIndicatorEl: HTMLElement | undefined;
+	private loadingIndicatorInterval: number | undefined;
+
+    constructor(
+        @IQuickInputService private readonly quickInputService: IQuickInputService,
+        @IChatWidgetService private readonly chatWidgetService: IChatWidgetService,
+        @IInstantiationService private readonly instantiationService: IInstantiationService,
+        @IStorageService private readonly storageService: IStorageService,
+        @IRequestService private readonly requestService: IRequestService,
+		@ISecretStorageService private readonly secretStorageService: ISecretStorageService,
+		@IFileService private readonly fileService: IFileService
+    ) {
+        super();
+        console.log('[AcuxCode] AISidebarView constructor called');
+        this.create();
+        console.log('[AcuxCode] AISidebarView created successfully');
+        this.tryBindWidget();
+    }
+
+    private create(): void {
+        // Create main container with theme-aware styling
+        this.container = $('div.ai-sidebar-simple');
+        
+        // Create resource labels for file icons
+        this.resourceLabels = this._register(this.instantiationService.createInstance(ResourceLabels, { onDidChangeVisibility: event.Event.None }));
+        
+        // Use CSS variables for theme colors instead of hardcoded values
+        this.container.style.width = '100%';
+        this.container.style.height = '100%';
+        this.container.style.padding = '20px';
+        this.container.style.display = 'flex';
+        this.container.style.flexDirection = 'column';
+        this.container.style.overflow = 'auto';
+        this.container.style.boxSizing = 'border-box';
+        
+        console.log('[AcuxCode] Container created with styles');
+
+        // Create messages area at the top
+        this.messagesArea = $('div');
+        this.messagesArea.style.flex = '1';
+        this.messagesArea.style.overflow = 'auto';
+        this.messagesArea.style.display = 'flex';
+        this.messagesArea.style.flexDirection = 'column';
+        this.messagesArea.style.gap = '12px';
+        this.messagesArea.style.paddingBottom = '20px';
+        this.container.appendChild(this.messagesArea);
+
+        // Add input box at the bottom
+        const inputContainer = $('div');
+        inputContainer.style.display = 'flex';
+        inputContainer.style.flexDirection = 'column';
+        inputContainer.style.paddingBottom = '10px';
+        inputContainer.style.flexShrink = '0';
+        inputContainer.style.alignItems = 'center';
+        inputContainer.style.justifyContent = 'center';
+        
+        // Create wrapper for the entire input area
+        const inputWrapper = $('div');
+        inputWrapper.style.position = 'relative';
+        inputWrapper.style.width = '95%';
+        inputWrapper.style.maxWidth = '900px';
+        inputWrapper.style.display = 'flex';
+        inputWrapper.style.flexDirection = 'column';
+        inputWrapper.style.border = '1px solid var(--vscode-input-border)';
+        inputWrapper.style.borderRadius = '12px';
+        inputWrapper.style.backgroundColor = 'var(--vscode-input-background)';
+        inputWrapper.style.overflow = 'hidden';
+        
+        // Files display area (above input)
+        this.filesDisplayArea = $('div');
+        this.filesDisplayArea.style.display = 'none'; // Hidden by default
+        this.filesDisplayArea.style.padding = '8px 12px';
+        this.filesDisplayArea.style.gap = '8px';
+        this.filesDisplayArea.style.flexWrap = 'wrap';
+        this.filesDisplayArea.style.borderBottom = '1px solid var(--vscode-input-border)';
+        this.filesDisplayArea.style.backgroundColor = 'var(--vscode-input-background)';
+        
+        // Top half - text input area
+        this.inputElement = $('textarea', { placeholder: 'Ask anything...' }) as HTMLTextAreaElement;
+        const input = this.inputElement;
+        input.style.padding = '12px 14px';
+        input.style.border = 'none';
+        input.style.fontSize = '13px';
+        input.style.backgroundColor = 'transparent';
+        input.style.color = 'var(--vscode-input-foreground)';
+        input.style.outline = 'none';
+        input.style.width = '100%';
+        input.style.boxSizing = 'border-box';
+        input.style.minHeight = '60px';
+        input.style.resize = 'none';
+        input.style.fontFamily = 'inherit';
+        
+        // Bottom half - controls area
+        const controlsArea = $('div');
+        controlsArea.style.display = 'flex';
+        controlsArea.style.alignItems = 'center';
+        controlsArea.style.justifyContent = 'space-between';
+        controlsArea.style.padding = '8px 12px';
+        controlsArea.style.backgroundColor = 'var(--vscode-input-background)';
+        
+        // Create custom model selector (with provider groups, search, and usage)
+        type ModelInfo = { name: string; provider: string; usage: string };
+        const availableModels: ModelInfo[] = [
+            // Basic (0.5 request)
+            { name: 'Gemini 2.0 Flash', provider: 'Google', usage: '0.5 request' },
+            { name: 'Gemini 2.5 Flash', provider: 'Google', usage: '0.5 request' },
+            { name: 'DeepSeek-Chat', provider: 'DeepSeek', usage: '0.5 request' },
+            { name: 'DeepSeek-Reasoner', provider: 'DeepSeek', usage: '0.5 request' },
+            { name: 'GPT-4o Mini', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-5 Mini', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-5 Nano', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-4.1 Mini', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'GPT-4.1 Nano', provider: 'OpenAI', usage: '0.5 request' },
+            { name: 'Grok 3 Mini', provider: 'xAI', usage: '0.5 request' },
+            { name: 'Claude 3.5 Haiku', provider: 'Anthropic', usage: '0.5 request' },
+            { name: 'Llama 4 Scout', provider: 'Meta', usage: '0.5 request' },
+            { name: 'o3 mini', provider: 'OpenAI', usage: '0.5 request' },
+
+            // Premium (default 1 request unless specified)
+            { name: 'DeepSeek-R1', provider: 'DeepSeek', usage: '1 request' },
+            { name: 'DeepSeek-V3', provider: 'DeepSeek', usage: '1 request' },
+            { name: 'GPT-4o', provider: 'OpenAI', usage: '1 request' },
+            { name: 'Claude 3.5 Sonnet', provider: 'Anthropic', usage: '1 request' },
+            { name: 'Claude 3.7 Sonnet', provider: 'Anthropic', usage: '1 request' },
+            { name: 'Claude Sonnet 4', provider: 'Anthropic', usage: '2 requests' },
+            { name: 'Claude 4.5 Sonnet', provider: 'Anthropic', usage: '2 requests' },
+            { name: 'Claude 4.5 Sonnet Thinking', provider: 'Anthropic', usage: '2.5 requests' },
+            { name: 'GPT-4.1', provider: 'OpenAI', usage: '1 request' },
+            { name: 'Grok 3 Beta', provider: 'xAI', usage: '1 request' },
+            { name: 'Gemini 2.0 Pro', provider: 'Google', usage: '1 request' },
+            { name: 'Gemini 2.5 Pro', provider: 'Google', usage: '1 request' },
+            { name: 'o3', provider: 'OpenAI', usage: '1 request' },
+            { name: 'GPT-5', provider: 'OpenAI', usage: '1 request' },
+            { name: 'Kimi K2', provider: 'Kimi', usage: '1 request' },
+            { name: 'Grok 4 Fast', provider: 'xAI', usage: '1 request' },
+
+            // Enterprise/Master (20 requests)
+            { name: 'Claude 3 Opus', provider: 'Anthropic', usage: '20 requests' },
+            { name: 'GPT-4', provider: 'OpenAI', usage: '20 requests' },
+            { name: 'Claude Opus 4', provider: 'Anthropic', usage: '20 requests' },
+            { name: 'GPT-4 Turbo', provider: 'OpenAI', usage: '20 requests' }
+        ];
+
+        const modelDropdownRoot = $('div');
+        modelDropdownRoot.style.position = 'relative';
+        modelDropdownRoot.style.display = 'inline-block';
+
+        const modelButton = $('button');
+        modelButton.style.padding = '4px 8px';
+        modelButton.style.fontSize = '11px';
+        modelButton.style.fontWeight = '600';
+        modelButton.style.border = '1px solid var(--vscode-input-border)';
+        modelButton.style.borderRadius = '6px';
+        modelButton.style.backgroundColor = 'var(--vscode-input-background)';
+        modelButton.style.color = 'var(--vscode-input-foreground)';
+        modelButton.style.cursor = 'pointer';
+        modelButton.style.outline = 'none';
+        modelButton.style.display = 'flex';
+        modelButton.style.alignItems = 'center';
+        modelButton.style.gap = '6px';
+
+		// Persistence helpers
+		const PERSIST_SCOPE = StorageScope.PROFILE;
+		const persistState = () => {
+			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyAutoMode, this.autoModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyReadableMode, this.readableModeEnabled ? '1' : '0', PERSIST_SCOPE, StorageTarget.USER);
+			this.storageService.store(this.storageKeyRecentModels, JSON.stringify(this.recentModels), PERSIST_SCOPE, StorageTarget.USER);
+			// Backward-compatible: persist apiKey field as empty to avoid leaking in plain storage
+			this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
+		};
+		const loadPersistedState = (all: ModelInfo[]) => {
+			const savedModel = this.storageService.get(this.storageKeySelectedModel, PERSIST_SCOPE);
+			const savedAuto = this.storageService.get(this.storageKeyAutoMode, PERSIST_SCOPE);
+			const savedRecents = this.storageService.get(this.storageKeyRecentModels, PERSIST_SCOPE);
+			const savedCustomModels = this.storageService.get(this.storageKeyCustomModels, PERSIST_SCOPE);
+			const savedReadable = this.storageService.get(this.storageKeyReadableMode, PERSIST_SCOPE);
+			this.autoModeEnabled = savedAuto === '1';
+			this.readableModeEnabled = savedReadable === '1';
+			try {
+				if (savedRecents) {
+					const parsed = JSON.parse(savedRecents);
+					if (Array.isArray(parsed)) {
+						this.recentModels = parsed.filter((n: unknown) => typeof n === 'string').slice(0, 3);
+					}
+				}
+				if (savedCustomModels) {
+					const parsed = JSON.parse(savedCustomModels);
+					if (Array.isArray(parsed)) {
+						// Back-compat: if apiKey is present (old versions), keep in memory but never re-persist
+						this.customModels = parsed.map((m: any) => ({
+							type: typeof m.type === 'string' ? m.type : 'OpenAI Compatible API',
+							name: String(m.name || ''),
+							endpoint: String(m.endpoint || ''),
+							modelIdentifier: String(m.modelIdentifier || ''),
+							apiKey: typeof m.apiKey === 'string' ? m.apiKey : ''
+						}));
+					}
+				}
+			} catch { /* ignore parse errors */ }
+			if (savedModel) {
+				const isBuiltIn = all.some(m => m.name === savedModel);
+				const isCustom = this.customModels.some(m => m.name === savedModel);
+				if (isBuiltIn || isCustom) {
+					this.selectedModel = savedModel;
+				}
+			}
+		};
+
+		// Set default selected model
+		this.selectedModel = 'Gemini 2.0 Flash';
+		loadPersistedState(availableModels);
+		// Prefer a custom model if available and none is selected
+		if (!this.customModels.some(m => m.name === this.selectedModel) && this.customModels.length > 0) {
+			this.selectedModel = this.customModels[0].name;
+		}
+		const setButtonLabel = () => {
+			modelButton.textContent = '';
+			if (this.autoModeEnabled) {
+				const autoSpan = $('span');
+				autoSpan.textContent = 'Auto';
+				autoSpan.style.fontWeight = '700';
+				modelButton.appendChild(autoSpan);
+				return;
+			}
+			const nameSpan = $('span');
+			nameSpan.textContent = this.selectedModel;
+			nameSpan.style.fontWeight = '400';
+			nameSpan.style.opacity = '0.85';
+			modelButton.appendChild(nameSpan);
+		};
+
+		const trackRecentModel = (name: string) => {
+			// Maintain unique last-3 list
+			this.recentModels = [name, ...this.recentModels.filter(n => n !== name)].slice(0, 3);
+			persistState();
+		};
+        setButtonLabel();
+
+        const dropdownPanel = $('div');
+        dropdownPanel.style.position = 'fixed';
+        dropdownPanel.style.left = '0px';
+        dropdownPanel.style.top = '0px';
+        dropdownPanel.style.minWidth = '260px';
+        dropdownPanel.style.maxWidth = '360px';
+        dropdownPanel.style.maxHeight = '500px';
+        dropdownPanel.style.overflow = 'hidden';
+        dropdownPanel.style.border = '1px solid var(--vscode-input-border)';
+        dropdownPanel.style.borderRadius = '8px';
+        dropdownPanel.style.background = 'var(--vscode-editor-background)';
+        dropdownPanel.style.boxShadow = '0 6px 18px rgba(0,0,0,0.2)';
+        dropdownPanel.style.display = 'none';
+        dropdownPanel.style.zIndex = '10000';
+        dropdownPanel.style.flexDirection = 'column';
+
+		// Auto mode toggle (top of dropdown)
+		const autoContainer = $('div');
+		autoContainer.style.display = 'flex';
+		autoContainer.style.alignItems = 'center';
+		autoContainer.style.justifyContent = 'space-between';
+		autoContainer.style.padding = '8px 10px 6px 10px';
+		const autoLabel = $('div');
+		autoLabel.textContent = 'Auto';
+		autoLabel.style.fontSize = '12px';
+		autoLabel.style.fontWeight = '600';
+		autoLabel.style.color = 'var(--vscode-foreground)';
+		// Apple-like switch
+		const autoSwitch = $('button') as HTMLButtonElement;
+		autoSwitch.setAttribute('role', 'switch');
+		autoSwitch.setAttribute('aria-label', 'Auto');
+		autoSwitch.style.width = '36px';
+		autoSwitch.style.height = '22px';
+		autoSwitch.style.minWidth = '36px';
+		autoSwitch.style.border = 'none';
+		autoSwitch.style.margin = '0';
+		autoSwitch.style.padding = '0';
+		autoSwitch.style.borderRadius = '999px';
+		autoSwitch.style.position = 'relative';
+		autoSwitch.style.cursor = 'pointer';
+		autoSwitch.style.outline = 'none';
+		autoSwitch.style.background = 'var(--vscode-input-border)';
+		const knob = $('div');
+		knob.style.position = 'absolute';
+		knob.style.top = '3px';
+		knob.style.left = '3px';
+		knob.style.width = '16px';
+		knob.style.height = '16px';
+		knob.style.borderRadius = '999px';
+		knob.style.background = 'var(--vscode-editor-background)';
+		knob.style.boxShadow = '0 1px 2px rgba(0,0,0,0.25)';
+		knob.style.transition = 'transform 120ms ease, left 120ms ease, background 120ms ease';
+		autoSwitch.appendChild(knob);
+		const setSwitchState = (on: boolean) => {
+			autoSwitch.setAttribute('aria-checked', on ? 'true' : 'false');
+			autoSwitch.style.background = on ? 'var(--vscode-button-background)' : 'var(--vscode-input-border)';
+			knob.style.left = on ? '17px' : '3px';
+			knob.style.background = on ? 'var(--vscode-editor-background)' : 'var(--vscode-editor-background)';
+		};
+		setSwitchState(this.autoModeEnabled);
+		const toggleAuto = () => {
+			this.autoModeEnabled = !this.autoModeEnabled;
+			setSwitchState(this.autoModeEnabled);
+			setButtonLabel();
+			updateInteractivity();
+			renderList(searchInput.value);
+			persistState();
+		};
+		autoSwitch.onclick = (e) => {
+			e.preventDefault();
+			toggleAuto();
+		};
+		autoSwitch.onkeydown = (e) => {
+			if (e.key === ' ' || e.key === 'Enter') {
+				e.preventDefault();
+				toggleAuto();
+			}
+		};
+		autoContainer.appendChild(autoLabel);
+		autoContainer.appendChild(autoSwitch);
+
+		// Readable mode toggle (improves output formatting)
+		const readableContainer = $('div');
+		readableContainer.style.display = 'flex';
+		readableContainer.style.alignItems = 'center';
+		readableContainer.style.justifyContent = 'space-between';
+		readableContainer.style.padding = '6px 10px 8px 10px';
+		const readableLabel = $('div');
+		readableLabel.textContent = 'Readable';
+		readableLabel.style.fontSize = '12px';
+		readableLabel.style.fontWeight = '600';
+		readableLabel.style.color = 'var(--vscode-foreground)';
+		const readableSwitch = $('button') as HTMLButtonElement;
+		readableSwitch.setAttribute('role', 'switch');
+		readableSwitch.setAttribute('aria-label', 'Readable');
+		readableSwitch.style.width = '36px';
+		readableSwitch.style.height = '22px';
+		readableSwitch.style.minWidth = '36px';
+		readableSwitch.style.border = 'none';
+		readableSwitch.style.margin = '0';
+		readableSwitch.style.padding = '0';
+		readableSwitch.style.borderRadius = '999px';
+		readableSwitch.style.position = 'relative';
+		readableSwitch.style.cursor = 'pointer';
+		readableSwitch.style.outline = 'none';
+		readableSwitch.style.background = 'var(--vscode-input-border)';
+		const readableKnob = $('div');
+		readableKnob.style.position = 'absolute';
+		readableKnob.style.top = '3px';
+		readableKnob.style.left = '3px';
+		readableKnob.style.width = '16px';
+		readableKnob.style.height = '16px';
+		readableKnob.style.borderRadius = '999px';
+		readableKnob.style.background = 'var(--vscode-editor-background)';
+		readableKnob.style.boxShadow = '0 1px 2px rgba(0,0,0,0.25)';
+		readableKnob.style.transition = 'transform 120ms ease, left 120ms ease, background 120ms ease';
+		readableSwitch.appendChild(readableKnob);
+		const setReadableState = (on: boolean) => {
+			readableSwitch.setAttribute('aria-checked', on ? 'true' : 'false');
+			readableSwitch.style.background = on ? 'var(--vscode-button-background)' : 'var(--vscode-input-border)';
+			readableKnob.style.left = on ? '17px' : '3px';
+			readableKnob.style.background = 'var(--vscode-editor-background)';
+		};
+		setReadableState(this.readableModeEnabled);
+		const toggleReadable = () => {
+			this.readableModeEnabled = !this.readableModeEnabled;
+			setReadableState(this.readableModeEnabled);
+			persistState();
+		};
+		readableSwitch.onclick = (e) => { e.preventDefault(); toggleReadable(); };
+		readableSwitch.onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleReadable(); } };
+		readableContainer.appendChild(readableLabel);
+		readableContainer.appendChild(readableSwitch);
+
+		// Search bar
+        const searchContainer = $('div');
+        searchContainer.style.padding = '8px';
+        const searchInput = $('input', { type: 'text', placeholder: 'Search models...' }) as HTMLInputElement;
+        searchInput.style.width = '100%';
+        searchInput.style.boxSizing = 'border-box';
+        searchInput.style.padding = '6px 8px';
+        searchInput.style.border = '1px solid var(--vscode-input-border)';
+        searchInput.style.borderRadius = '4px';
+        searchInput.style.background = 'var(--vscode-input-background)';
+        searchInput.style.color = 'var(--vscode-input-foreground)';
+        searchContainer.appendChild(searchInput);
+
+        // List area
+        const listScroll = $('div');
+        listScroll.style.overflow = 'auto';
+        listScroll.style.maxHeight = '380px';
+        listScroll.style.flex = '1';
+        listScroll.style.minHeight = '0';
+
+        const providers = Array.from(new Set(availableModels.map(m => m.provider)));
+
+		const renderList = (filter: string) => {
+            while (listScroll.firstChild) {
+                listScroll.removeChild(listScroll.firstChild);
+            }
+            const norm = (s: string) => s.toLowerCase();
+            const f = norm(filter || '');
+
+			// Recently used
+			if (this.recentModels.length > 0) {
+				const recentModelsInfo = this.recentModels
+					.map(n => availableModels.find(m => m.name === n))
+					.filter((m): m is ModelInfo => !!m)
+					.filter(m => !f || norm(m.name).includes(f));
+				if (recentModelsInfo.length > 0) {
+					const rHeader = $('div');
+					rHeader.textContent = 'Recently used';
+					rHeader.style.position = 'sticky';
+					rHeader.style.top = '0';
+					rHeader.style.zIndex = '1';
+					rHeader.style.padding = '6px 8px';
+					rHeader.style.background = 'var(--vscode-editor-background)';
+					rHeader.style.color = 'var(--vscode-descriptionForeground)';
+					rHeader.style.fontSize = '10px';
+					rHeader.style.fontWeight = '700';
+					rHeader.style.textTransform = 'uppercase';
+					listScroll.appendChild(rHeader);
+
+					recentModelsInfo.forEach(model => {
+						const item = $('div');
+						item.style.display = 'flex';
+						item.style.alignItems = 'center';
+						item.style.justifyContent = 'space-between';
+						item.style.gap = '8px';
+						item.style.padding = '8px';
+						item.style.cursor = 'pointer';
+						item.style.fontSize = '12px';
+						item.style.borderTop = '1px solid var(--vscode-widget-border, transparent)';
+						if (this.autoModeEnabled) { item.style.pointerEvents = 'none'; item.style.opacity = '0.6'; }
+						const name = $('span');
+						name.textContent = model.name;
+						name.style.color = 'var(--vscode-foreground)';
+						name.style.whiteSpace = 'nowrap';
+						name.style.overflow = 'hidden';
+						name.style.textOverflow = 'ellipsis';
+						const usage = $('span');
+						usage.textContent = model.usage;
+						usage.style.color = 'var(--vscode-descriptionForeground)';
+						usage.style.fontSize = '11px';
+						item.appendChild(name);
+						item.appendChild(usage);
+
+						item.onmouseenter = () => { if (!this.autoModeEnabled) { item.style.background = 'var(--vscode-list-hoverBackground)'; } };
+						item.onmouseleave = () => item.style.background = 'transparent';
+						item.onclick = () => {
+							if (this.autoModeEnabled) { return; }
+							this.selectedModel = model.name;
+							trackRecentModel(model.name);
+							setButtonLabel();
+							dropdownPanel.style.display = 'none';
+							console.log('[AcuxCode] Model changed to:', this.selectedModel);
+						};
+						listScroll.appendChild(item);
+					});
+				}
+			}
+			providers.forEach(provider => {
+                const models = availableModels.filter(m => m.provider === provider && (!f || norm(m.name).includes(f)));
+                if (models.length === 0) {
+                    return;
+                }
+                const header = $('div');
+                header.textContent = provider;
+                header.style.position = 'sticky';
+                header.style.top = '0';
+                header.style.zIndex = '1';
+                header.style.padding = '6px 8px';
+                header.style.background = 'var(--vscode-editor-background)';
+                header.style.color = 'var(--vscode-descriptionForeground)';
+                header.style.fontSize = '10px';
+                header.style.fontWeight = '700';
+                header.style.textTransform = 'uppercase';
+                listScroll.appendChild(header);
+
+				models.forEach(model => {
+                    const item = $('div');
+                    item.style.display = 'flex';
+                    item.style.alignItems = 'center';
+                    item.style.justifyContent = 'space-between';
+                    item.style.gap = '8px';
+                    item.style.padding = '8px';
+                    item.style.cursor = 'pointer';
+                    item.style.fontSize = '12px';
+                    item.style.borderTop = '1px solid var(--vscode-widget-border, transparent)';
+					if (this.autoModeEnabled) { item.style.pointerEvents = 'none'; item.style.opacity = '0.6'; }
+                    const name = $('span');
+                    name.textContent = model.name;
+                    name.style.color = 'var(--vscode-foreground)';
+                    name.style.whiteSpace = 'nowrap';
+                    name.style.overflow = 'hidden';
+                    name.style.textOverflow = 'ellipsis';
+                    const usage = $('span');
+                    usage.textContent = model.usage;
+                    usage.style.color = 'var(--vscode-descriptionForeground)';
+                    usage.style.fontSize = '11px';
+                    item.appendChild(name);
+                    item.appendChild(usage);
+
+					item.onmouseenter = () => { if (!this.autoModeEnabled) { item.style.background = 'var(--vscode-list-hoverBackground)'; } };
+                    item.onmouseleave = () => item.style.background = 'transparent';
+                    item.onclick = () => {
+						if (this.autoModeEnabled) { return; }
+						this.selectedModel = model.name;
+						trackRecentModel(model.name);
+						setButtonLabel();
+						dropdownPanel.style.display = 'none';
+						console.log('[AcuxCode] Model changed to:', this.selectedModel);
+                    };
+                    listScroll.appendChild(item);
+                });
+            });
+            
+            // My Models section (at the bottom)
+			if (this.customModels.length > 0) {
+				const filteredCustom = this.customModels.filter(m => !f || norm(m.name).includes(f));
+				if (filteredCustom.length > 0) {
+					const customHeader = $('div');
+					customHeader.textContent = 'My Models';
+					customHeader.style.position = 'sticky';
+					customHeader.style.top = '0';
+					customHeader.style.zIndex = '1';
+					customHeader.style.padding = '6px 8px';
+					customHeader.style.background = 'var(--vscode-editor-background)';
+					customHeader.style.color = 'var(--vscode-descriptionForeground)';
+					customHeader.style.fontSize = '10px';
+					customHeader.style.fontWeight = '700';
+					customHeader.style.textTransform = 'uppercase';
+					listScroll.appendChild(customHeader);
+
+					filteredCustom.forEach(model => {
+						const item = $('div');
+						item.style.display = 'flex';
+						item.style.alignItems = 'center';
+						item.style.justifyContent = 'space-between';
+						item.style.gap = '8px';
+						item.style.padding = '8px';
+						item.style.cursor = 'pointer';
+						item.style.fontSize = '12px';
+						item.style.borderTop = '1px solid var(--vscode-widget-border, transparent)';
+						if (this.autoModeEnabled) { item.style.pointerEvents = 'none'; item.style.opacity = '0.6'; }
+						
+						const name = $('span');
+						name.textContent = model.name;
+						name.style.color = 'var(--vscode-foreground)';
+						name.style.whiteSpace = 'nowrap';
+						name.style.overflow = 'hidden';
+						name.style.textOverflow = 'ellipsis';
+						name.style.flex = '1';
+						item.appendChild(name);
+
+						// Actions (edit/delete) on hover
+						const actions = $('div');
+						actions.style.display = 'none';
+						actions.style.gap = '4px';
+
+						const makeIconButton = (label: string) => {
+							const btn = $('button');
+							btn.textContent = label;
+							btn.style.border = '1px solid var(--vscode-input-border)';
+							btn.style.background = 'var(--vscode-input-background)';
+							btn.style.color = 'var(--vscode-foreground)';
+							btn.style.fontSize = '10px';
+							btn.style.padding = '3px 8px';
+							btn.style.borderRadius = '3px';
+							btn.style.cursor = 'pointer';
+							btn.style.lineHeight = '1';
+							btn.onmouseenter = () => btn.style.background = 'var(--vscode-button-hoverBackground)';
+							btn.onmouseleave = () => btn.style.background = 'var(--vscode-input-background)';
+							return btn;
+						};
+
+						const editBtn = makeIconButton('Edit');
+						const deleteBtn = makeIconButton('Delete');
+						deleteBtn.style.color = 'var(--vscode-errorForeground)';
+						actions.appendChild(editBtn);
+						actions.appendChild(deleteBtn);
+						item.appendChild(actions);
+
+						editBtn.onclick = (e) => {
+							e.stopPropagation();
+							dropdownPanel.style.display = 'none';
+							this.showAddModelPage(model);
+						};
+						
+						deleteBtn.onclick = (e) => {
+							e.stopPropagation();
+							// Remove from array
+							const index = this.customModels.findIndex(m => m.name === model.name && m.endpoint === model.endpoint);
+							if (index !== -1) {
+								this.customModels.splice(index, 1);
+								// Persist to storage (non-sensitive)
+								const PERSIST_SCOPE = StorageScope.PROFILE;
+								this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
+								// Delete associated secret
+								(async () => { try { await this.secretStorageService.delete(`acuxcode.customModels.${model.name}@${model.endpoint}`); } catch {} })();
+								// Re-render list
+								renderList(searchInput.value);
+								console.log('[AcuxCode] Custom model deleted:', model.name);
+							}
+						};
+
+						item.onmouseenter = () => { 
+							if (!this.autoModeEnabled) { 
+								item.style.background = 'var(--vscode-list-hoverBackground)'; 
+								actions.style.display = 'flex';
+							} 
+						};
+						item.onmouseleave = () => { 
+							item.style.background = 'transparent'; 
+							actions.style.display = 'none';
+						};
+						
+						item.onclick = () => {
+							if (this.autoModeEnabled) { return; }
+							this.selectedModel = model.name;
+							trackRecentModel(model.name);
+							setButtonLabel();
+							dropdownPanel.style.display = 'none';
+							console.log('[AcuxCode] Model changed to:', this.selectedModel);
+						};
+						listScroll.appendChild(item);
+					});
+				}
+			}
+        };
+
+        renderList('');
+        searchInput.oninput = () => renderList(searchInput.value);
+
+		// Add Model button at bottom (fixed, not scrollable)
+		const addModelButton = $('button');
+		addModelButton.textContent = '+ Add Model';
+		addModelButton.style.width = '100%';
+		addModelButton.style.padding = '10px';
+		addModelButton.style.border = 'none';
+		addModelButton.style.borderTop = '1px solid var(--vscode-input-border)';
+		addModelButton.style.background = 'var(--vscode-editor-background)';
+		addModelButton.style.color = 'var(--vscode-button-foreground)';
+		addModelButton.style.fontSize = '12px';
+		addModelButton.style.fontWeight = '600';
+		addModelButton.style.cursor = 'pointer';
+		addModelButton.style.textAlign = 'center';
+		addModelButton.style.flexShrink = '0';
+		addModelButton.onmouseenter = () => addModelButton.style.background = 'var(--vscode-list-hoverBackground)';
+		addModelButton.onmouseleave = () => addModelButton.style.background = 'var(--vscode-editor-background)';
+		addModelButton.onclick = () => {
+			closeDropdown();
+			this.showAddModelPage();
+		};
+
+		dropdownPanel.appendChild(autoContainer);
+		dropdownPanel.appendChild(searchContainer);
+        dropdownPanel.appendChild(listScroll);
+		dropdownPanel.appendChild(addModelButton);
+
+		const updateInteractivity = () => {
+			searchInput.disabled = this.autoModeEnabled;
+			listScroll.style.pointerEvents = this.autoModeEnabled ? 'none' : 'auto';
+			listScroll.style.opacity = this.autoModeEnabled ? '0.6' : '1';
+		};
+
+        // Render dropdown in body to avoid clipping by overflow/scroll containers
+        document.body.appendChild(dropdownPanel);
+
+        const positionDropdown = () => {
+            const btnRect = modelButton.getBoundingClientRect();
+            const viewportHeight = window.innerHeight;
+            const panelMaxHeight = Math.min(500, Math.max(200, viewportHeight - 24));
+            dropdownPanel.style.maxHeight = panelMaxHeight + 'px';
+
+            // Preferred: open upwards if there is more space above; otherwise open below
+            const spaceBelow = viewportHeight - btnRect.bottom;
+            const spaceAbove = btnRect.top;
+            const openUpwards = spaceAbove > spaceBelow;
+
+            const panelWidth = Math.min(360, Math.max(260, btnRect.width));
+            dropdownPanel.style.width = panelWidth + 'px';
+
+            const left = Math.min(Math.max(8, btnRect.left), Math.max(8, window.innerWidth - panelWidth - 8));
+            dropdownPanel.style.left = left + 'px';
+
+            if (openUpwards) {
+                const desiredBottom = viewportHeight - btnRect.top + 4; // 4px gap
+                dropdownPanel.style.bottom = desiredBottom + 'px';
+                dropdownPanel.style.top = '';
+            } else {
+                const top = btnRect.bottom + 4; // 4px gap
+                dropdownPanel.style.top = top + 'px';
+                dropdownPanel.style.bottom = '';
+            }
+        };
+
+        const openDropdown = () => {
+            positionDropdown();
+            dropdownPanel.style.display = 'block';
+            searchInput.focus();
+            window.addEventListener('scroll', positionDropdown, true);
+            window.addEventListener('resize', positionDropdown);
+        };
+        const closeDropdown = () => {
+            dropdownPanel.style.display = 'none';
+            window.removeEventListener('scroll', positionDropdown, true);
+            window.removeEventListener('resize', positionDropdown);
+        };
+
+        let outsideClickHandler: ((e: MouseEvent) => void) | null = null;
+        modelButton.onclick = (e) => {
+            e.stopPropagation();
+            if (dropdownPanel.style.display === 'none') {
+                openDropdown();
+                if (!outsideClickHandler) {
+                    outsideClickHandler = (ev: MouseEvent) => {
+                        if (!dropdownPanel.contains(ev.target as Node) && ev.target !== modelButton) {
+                            closeDropdown();
+                            if (outsideClickHandler) {
+                                document.removeEventListener('click', outsideClickHandler);
+                                outsideClickHandler = null;
+                            }
+                        }
+                    };
+                    document.addEventListener('click', outsideClickHandler);
+                }
+            } else {
+                closeDropdown();
+                if (outsideClickHandler) {
+                    document.removeEventListener('click', outsideClickHandler);
+                    outsideClickHandler = null;
+                }
+            }
+        };
+
+        // Keyboard handling for search (Esc to close)
+        searchInput.onkeydown = (ev) => {
+            if (ev.key === 'Escape') {
+                closeDropdown();
+                modelButton.focus();
+            }
+        };
+
+        modelDropdownRoot.appendChild(modelButton);
+        modelDropdownRoot.appendChild(dropdownPanel);
+        
+        // Create send button (circular with clean arrow)
+        const sendButton = $('button');
+        sendButton.style.width = '28px';
+        sendButton.style.height = '28px';
+        sendButton.style.borderRadius = '50%';
+        sendButton.style.border = 'none';
+        sendButton.style.backgroundColor = '#ffffff';
+        sendButton.style.cursor = 'pointer';
+        sendButton.style.display = 'flex';
+        sendButton.style.alignItems = 'center';
+        sendButton.style.justifyContent = 'center';
+        sendButton.style.padding = '0';
+        sendButton.style.boxShadow = '0 1px 3px rgba(0,0,0,0.12)';
+        sendButton.setAttribute('aria-label', 'Send message');
+        
+        // Create SVG arrow using DOM
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('width', '14');
+        svg.setAttribute('height', '14');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('fill', 'none');
+        svg.style.display = 'block';
+        
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', 'M8 3L8 13M8 3L4 7M8 3L12 7');
+        path.setAttribute('stroke', '#000000');
+        path.setAttribute('stroke-width', '2');
+        path.setAttribute('stroke-linecap', 'round');
+        path.setAttribute('stroke-linejoin', 'round');
+        
+        svg.appendChild(path);
+        sendButton.appendChild(svg);
+        
+        // Add hover effect
+        sendButton.onmouseenter = () => {
+            sendButton.style.backgroundColor = '#f2f2f2';
+        };
+        sendButton.onmouseleave = () => {
+            sendButton.style.backgroundColor = '#ffffff';
+        };
+        
+        // Add send button click handler
+        sendButton.onclick = () => {
+            this.handleSendMessage();
+        };
+        
+        // Add Enter key handler for input (Shift+Enter for new line)
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.handleSendMessage();
+            }
+        };
+        
+        // Create add file button
+        const addFileButton = $('button');
+        addFileButton.style.width = '28px';
+        addFileButton.style.height = '28px';
+        addFileButton.style.borderRadius = '50%';
+        addFileButton.style.border = '1px solid var(--vscode-input-border)';
+        addFileButton.style.backgroundColor = 'transparent';
+        addFileButton.style.cursor = 'pointer';
+        addFileButton.style.display = 'flex';
+        addFileButton.style.alignItems = 'center';
+        addFileButton.style.justifyContent = 'center';
+        addFileButton.style.padding = '0';
+        addFileButton.setAttribute('aria-label', 'Add file');
+        
+        // Create plus SVG icon
+        const plusSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        plusSvg.setAttribute('width', '14');
+        plusSvg.setAttribute('height', '14');
+        plusSvg.setAttribute('viewBox', '0 0 16 16');
+        plusSvg.setAttribute('fill', 'none');
+        plusSvg.style.display = 'block';
+        
+        const plusPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        plusPath.setAttribute('d', 'M8 3V13M3 8H13');
+        plusPath.setAttribute('stroke', 'var(--vscode-input-foreground)');
+        plusPath.setAttribute('stroke-width', '2');
+        plusPath.setAttribute('stroke-linecap', 'round');
+        
+        plusSvg.appendChild(plusPath);
+        addFileButton.appendChild(plusSvg);
+        
+        // Add hover effect for file button
+        addFileButton.onmouseenter = () => {
+            addFileButton.style.backgroundColor = 'var(--vscode-list-hoverBackground)';
+        };
+        addFileButton.onmouseleave = () => {
+            addFileButton.style.backgroundColor = 'transparent';
+        };
+        
+        // Add click handler for file button
+        addFileButton.onclick = () => {
+            console.log('[AcuxCode] Add file button clicked');
+            this.openFilePicker();
+        };
+        
+        // Left side controls (model + add file)
+        const leftControls = $('div');
+        leftControls.style.display = 'flex';
+        leftControls.style.gap = '8px';
+        leftControls.style.alignItems = 'center';
+        leftControls.appendChild(modelDropdownRoot);
+        leftControls.appendChild(addFileButton);
+        
+        // Assemble the controls area
+        controlsArea.appendChild(leftControls);
+        controlsArea.appendChild(sendButton);
+        
+        // Assemble the input wrapper
+        inputWrapper.appendChild(this.filesDisplayArea);
+        inputWrapper.appendChild(input);
+        inputWrapper.appendChild(controlsArea);
+        inputContainer.appendChild(inputWrapper);
+        
+        this.container.appendChild(inputContainer);
+        console.log('[AcuxCode] Input box added');
+    }
+    private tryBindWidget(): void {
+        const widget = this.chatWidgetService.lastFocusedWidget;
+        if (!widget) {
+            return;
+        }
+        this._register(widget.attachmentModel.onDidChange(() => {
+            this.syncFromWidget();
+        }));
+        this.syncFromWidget();
+    }
+
+    private syncFromWidget(): void {
+        const widget = this.chatWidgetService.lastFocusedWidget;
+        if (!widget) {
+            return;
+        }
+        const fileUris = widget.attachmentModel.fileAttachments;
+        this.attachedFiles = fileUris.map(uri => ({ name: basename(uri.path), uri }));
+        this.updateFilesDisplay();
+    }
+
+
+    public getDomNode(): HTMLElement {
+        console.log('[AcuxCode] getDomNode called, returning:', this.container);
+        return this.container;
+    }
+
+    public focus(): void {
+        console.log('[AcuxCode] focus called');
+    }
+
+    public getValue(): string {
+        return this.inputElement?.value || '';
+    }
+
+    public setValue(value: string): void {
+        console.log('[AcuxCode] setValue called with:', value);
+        if (this.inputElement) {
+            this.inputElement.value = value;
+        }
+    }
+    
+    private async openFilePicker(): Promise<void> {
+        console.log('[AcuxCode] openFilePicker called');
+        
+        const isIQuickPickItemWithResource = (obj: unknown): obj is IQuickPickItemWithResource => {
+            return !!obj && typeof obj === 'object' && 'resource' in obj && URI.isUri((obj as IQuickPickItemWithResource).resource);
+        };
+
+        const isIGotoSymbolQuickPickItem = (obj: unknown): obj is IGotoSymbolQuickPickItem => {
+            return !!obj && typeof obj === 'object' && 'uri' in obj && 'range' in obj && !!(obj as IGotoSymbolQuickPickItem).uri && !!(obj as IGotoSymbolQuickPickItem).range;
+        };
+
+        const providerOptions: AnythingQuickAccessProviderRunOptions = {
+            handleAccept: async (item: unknown, isBackground: boolean) => {
+                console.log('[AcuxCode] handleAccept called with item:', item);
+                try {
+                    if (isIQuickPickItemWithResource(item) && item.resource) {
+                        const uri = item.resource;
+                        console.log('[AcuxCode] Adding file from IQuickPickItemWithResource:', uri.toString());
+                        this.addFile(basename(uri.path), uri);
+                        return true; // Return true to prevent default file opening behavior
+                    } else if (isIGotoSymbolQuickPickItem(item) && item.uri) {
+                        const uri = item.uri;
+                        console.log('[AcuxCode] Adding file from IGotoSymbolQuickPickItem:', uri.toString());
+                        this.addFile(basename(uri.path), uri);
+                        return true; // Return true to prevent default file opening behavior
+                    } else {
+                        console.log('[AcuxCode] Item did not match expected types');
+                    }
+                } catch (error) {
+                    console.error('[AcuxCode] Error in handleAccept:', error);
+                }
+                return false;
+            }
+        };
+
+        console.log('[AcuxCode] Showing quick access picker');
+        this.quickInputService.quickAccess.show('', {
+            enabledProviderPrefixes: [
+                AnythingQuickAccessProvider.PREFIX,
+                SymbolsQuickAccessProvider.PREFIX,
+                AbstractGotoSymbolQuickAccessProvider.PREFIX
+            ],
+            placeholder: 'Search files to attach',
+            providerOptions
+        });
+    }
+    
+    private addFile(name: string, uri: URI): void {
+        console.log('[AcuxCode] Adding file:', name, uri.toString());
+        
+        // Check if file is already attached
+        const isDuplicate = this.attachedFiles.some(file => file.uri.toString() === uri.toString());
+        if (isDuplicate) {
+            console.log('[AcuxCode] File already attached, skipping:', name);
+            return;
+        }
+        
+        this.attachedFiles.push({ name, uri });
+        console.log('[AcuxCode] Total attached files:', this.attachedFiles.length);
+        this.updateFilesDisplay();
+    }
+    
+    private removeFile(index: number): void {
+        this.attachedFiles.splice(index, 1);
+        this.updateFilesDisplay();
+    }
+    
+    private handleSendMessage(): void {
+        const message = this.inputElement.value.trim();
+        
+        if (!message && this.attachedFiles.length === 0) {
+            console.log('[AcuxCode] No message or files to send');
+            return;
+        }
+        
+        console.log('[AcuxCode] ========== SENDING MESSAGE ==========');
+        console.log('[AcuxCode] Message:', message);
+        console.log('[AcuxCode] Model:', this.selectedModel);
+        console.log('[AcuxCode] Attached files count:', this.attachedFiles.length);
+        
+        // Display user message
+        if (message) {
+            this.displayUserMessage(message);
+        }
+        
+        if (this.attachedFiles.length > 0) {
+            console.log('[AcuxCode] Attached files:');
+            this.attachedFiles.forEach((file, index) => {
+                console.log(`[AcuxCode]   ${index + 1}. ${file.name} (${file.uri.toString()})`);
+            });
+        }
+        
+        // Clear input and files after sending
+        this.inputElement.value = '';
+        const filesSnapshot = [...this.attachedFiles];
+        this.attachedFiles = [];
+        this.updateFilesDisplay();
+        
+		// If no valid custom model is selected but exactly one exists, auto-select it
+		if (!this.customModels.some(m => m.name === this.selectedModel) && this.customModels.length === 1) {
+			this.selectedModel = this.customModels[0].name;
+			const PERSIST_SCOPE = StorageScope.PROFILE;
+			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
+			console.log('[AcuxCode] Auto-selected the only custom model:', this.selectedModel);
+		}
+
+		// Send API request
+		this.sendAIRequest(message, filesSnapshot);
+        
+        console.log('[AcuxCode] Input cleared, ready for next message');
+    }
+    
+    private async sendAIRequest(message: string, files: Array<{ name: string; uri: URI }>): Promise<void> {
+        console.log('[AcuxCode] Sending AI request...');
+        
+        // Find the custom model configuration if it's a custom model
+        const customModel = this.customModels.find(m => m.name === this.selectedModel);
+        
+		if (!customModel) {
+			const hasCustom = this.customModels.length > 0;
+			const hint = hasCustom ? 'Please select one of your models from the dropdown.' : 'Click "+ Add Model" to add an OpenAI-compatible or LM Studio model (no API key needed for LM Studio).';
+			console.log('[AcuxCode] No custom model selected; cannot send request');
+			this.displayAIMessage('No custom model selected. ' + hint);
+			return;
+		}
+        
+		console.log('[AcuxCode] Using custom model:', customModel.name);
+        console.log('[AcuxCode] Endpoint:', customModel.endpoint);
+        console.log('[AcuxCode] Model ID:', customModel.modelIdentifier);
+        
+		// Show loading indicator with minimum dwell time
+		const loadingStartAt = Date.now();
+		this.showLoadingIndicator();
+		
+		try {
+            // Prepare the request body (OpenAI-compatible format)
+			let requestBody: any = {
+                model: customModel.modelIdentifier || 'default',
+                messages: [
+                    {
+                        role: 'user',
+						content: message
+                    }
+                ],
+                stream: false
+            };
+
+			// Append attached files (up to ~1MB per file). Oversized -> warn and skip.
+			if (files && files.length > 0) {
+				const MAX_PER_FILE_BYTES = 1 * 1024 * 1024; // 1MB
+				let filesSection = '';
+				for (const f of files) {
+					try {
+						const stat = await this.fileService.stat(f.uri);
+						if (typeof stat.size === 'number' && stat.size > MAX_PER_FILE_BYTES) {
+							// Ephemeral warning message
+							this.displayAIMessage(`Warning: ${f.name} is too big for the model input (>${MAX_PER_FILE_BYTES} bytes). Skipped.`);
+							continue;
+						}
+						const content = (await this.fileService.readFile(f.uri)).value.toString();
+						filesSection += `\n\n[File: ${f.name}]\n\n\`\`\`\n${content}\n\`\`\``;
+					} catch (err) {
+						this.displayAIMessage(`Warning: Failed to read ${f.name}. Skipped.`);
+					}
+				}
+				if (filesSection) {
+					requestBody.messages[0].content = `${requestBody.messages[0].content}${filesSection}`;
+				}
+			}
+            
+			// Prepare headers
+			const headers: Record<string, string> = {
+				'Content-Type': 'application/json',
+				'Accept': 'application/json'
+			};
+            
+			// Load API key from secret storage
+			let resolvedApiKey: string | undefined;
+			try {
+				resolvedApiKey = await this.secretStorageService.get(`acuxcode.customModels.${customModel.name}@${customModel.endpoint}`);
+			} catch { /* ignore */ }
+			if (!resolvedApiKey && customModel.apiKey) {
+				resolvedApiKey = customModel.apiKey; // backward-compat fallback for older saved models
+			}
+			// Global fallback: host-level and generic OpenAI-compatible key
+			if (!resolvedApiKey) {
+				try {
+					const host = (() => { try { return new URL(customModel.endpoint).hostname; } catch { return ''; } })();
+					resolvedApiKey = await this.secretStorageService.get(`acuxcode.global.host.${host}`) || await this.secretStorageService.get('acuxcode.global.openai_compatible') || undefined;
+				} catch { /* ignore */ }
+			}
+			// Add API key (Authorization by default)
+			if (resolvedApiKey) {
+				headers['Authorization'] = `Bearer ${resolvedApiKey}`;
+			}
+            
+			// Determine the correct endpoint based on provider type
+			let apiUrl = customModel.endpoint;
+			const ensureTrailing = (base: string, segment: string) => base.endsWith(segment) ? base : `${base}${segment}`;
+			const hasV1 = (url: string) => /\/v1(\/|$)/.test(url);
+            if (customModel.type === 'Ollama') {
+                apiUrl = `${customModel.endpoint}/api/generate`;
+                // Ollama uses different format
+                requestBody.model = customModel.modelIdentifier;
+                requestBody.prompt = message;
+                delete requestBody.messages;
+			} else if ((customModel.endpoint || '').toLowerCase().includes('openai.azure.com')) {
+				// Azure OpenAI: use api-key header, Azure deployments path, remove model from body
+				if (resolvedApiKey) {
+					delete headers['Authorization'];
+					headers['api-key'] = resolvedApiKey;
+				}
+				const root = customModel.endpoint.replace(/\/$/, '');
+				const hasApiVersion = /[?&]api-version=/.test(root);
+				const apiVersion = '2024-02-15-preview';
+				if (/\/openai\/deployments\//.test(root)) {
+					apiUrl = hasApiVersion ? root : `${root}${root.includes('?') ? '&' : '?'}api-version=${apiVersion}`;
+				} else {
+					const dep = encodeURIComponent(customModel.modelIdentifier || 'deployment');
+					apiUrl = `${root}/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`;
+				}
+				delete requestBody.model;
+			} else if (customModel.type === 'LM Studio') {
+				// LM Studio exposes OpenAI-compatible API, usually at /v1
+				const base = hasV1(customModel.endpoint) ? customModel.endpoint : ensureTrailing(customModel.endpoint.replace(/\/$/, ''), '/v1');
+				apiUrl = `${base}/chat/completions`;
+			} else {
+				// OpenAI Compatible API: ensure /v1 prefix if missing
+				const base = hasV1(customModel.endpoint) ? customModel.endpoint : ensureTrailing(customModel.endpoint.replace(/\/$/, ''), '/v1');
+				apiUrl = `${base}/chat/completions`;
+			}
+            
+			// Provider-specific header tweaks (OpenRouter Browser key support)
+			try {
+				const lowerEndpoint = (customModel.endpoint || '').toLowerCase();
+				if (lowerEndpoint.includes('openrouter.ai')) {
+					// Allowed custom headers per OpenRouter docs; keep minimal to avoid preflight issues
+					if (!headers['HTTP-Referer']) {
+						headers['HTTP-Referer'] = 'https://acuxcode.local';
+					}
+					if (!headers['X-Title']) {
+						headers['X-Title'] = 'AcuxCode';
+					}
+				}
+			} catch { /* ignore */ }
+
+			console.log('[AcuxCode] Sending request to:', apiUrl);
+			console.log('[AcuxCode] Request body:', JSON.stringify(requestBody, null, 2));
+			try {
+				const masked: Record<string, string> = { ...headers } as any;
+				if (masked['Authorization']) masked['Authorization'] = 'Bearer ••••••••';
+				if (masked['api-key']) masked['api-key'] = '••••••••';
+				if (masked['x-api-key']) masked['x-api-key'] = '••••••••';
+				console.log('[AcuxCode] Headers:', masked);
+			} catch { /* ignore */ }
+
+			// Use VS Code request service to avoid CORS in desktop
+			const reqHeaders: IHeaders = { ...headers };
+			const ctx = await this.requestService.request({ type: 'POST', url: apiUrl, headers: reqHeaders, data: JSON.stringify(requestBody), timeout: 30000 }, CancellationToken.None);
+			if (!isSuccess(ctx)) {
+				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+				const statusCode = ctx.res.statusCode ?? 0;
+				const rawBody = (await asText(ctx)) ?? '';
+				let parsed: any | undefined;
+				try { parsed = rawBody ? JSON.parse(rawBody) : undefined; } catch { /* not JSON */ }
+				const headersObj = ctx.res.headers || {};
+				const requestId = headersObj['x-request-id']
+					|| headersObj['x-ms-request-id']
+					|| headersObj['x-openai-request-id']
+					|| headersObj['request-id']
+					|| undefined;
+				const wwwAuth = headersObj['www-authenticate'] as string | undefined;
+
+				let providerError = '';
+				if (parsed) {
+					const err = (parsed.error ?? parsed.errors ?? parsed);
+					if (typeof err === 'string') {
+						providerError = err;
+					} else if (err && typeof err === 'object') {
+						providerError = err.message || err.detail || err.error || '';
+						if (!providerError && err.innererror && typeof err.innererror === 'object') {
+							providerError = err.innererror.message || err.innererror.detail || '';
+						}
+					}
+				}
+
+				let errorMessage = '';
+				errorMessage += `Request failed\n\n`;
+				errorMessage += `Status: ${statusCode}\n`;
+				errorMessage += `URL: ${apiUrl}\n`;
+				errorMessage += `Provider: ${customModel.type}\n`;
+				errorMessage += `Model: ${customModel.modelIdentifier}\n`;
+				if (requestId) { errorMessage += `Request ID: ${requestId}\n`; }
+				if (wwwAuth) { errorMessage += `WWW-Authenticate: ${wwwAuth}\n`; }
+
+				if (providerError) {
+					errorMessage += `\nError: ${providerError}\n`;
+				} else if (rawBody) {
+					const bodyPreview = rawBody;
+					errorMessage += `\nBody:\n${bodyPreview}\n`;
+				}
+
+				this.displayAIMessage(errorMessage);
+				return;
+			}
+
+			const data = await asJson<any>(ctx);
+			console.log('[AcuxCode] API response received:', data);
+            
+            // Extract the response message based on provider type
+            let aiMessage: string | undefined;
+            
+            if (customModel.type === 'Ollama') {
+                // Ollama format
+                aiMessage = data.response;
+            } else {
+                // OpenAI format (LM Studio and OpenAI Compatible API)
+                if (data.choices && data.choices.length > 0 && data.choices[0].message) {
+                    aiMessage = data.choices[0].message.content;
+                }
+            }
+            
+			if (aiMessage) {
+				if (this.readableModeEnabled) {
+					aiMessage = this.toReadable(aiMessage);
+				}
+				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+				this.displayAIMessage(aiMessage);
+            } else {
+				console.error('[AcuxCode] Unexpected response format:', data);
+				await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+				this.displayAIMessage('Error: Unexpected response format from API\n\n' + JSON.stringify(data, null, 2));
+            }
+            
+		} catch (error) {
+			await this.hideLoadingIndicatorAfterMin(loadingStartAt);
+			console.error('[AcuxCode] API request error:', error);
+			let lines: string[] = [];
+			lines.push('Request error');
+			lines.push('');
+			lines.push(`Provider: ${customModel.type}`);
+			lines.push(`Model: ${customModel.modelIdentifier}`);
+			lines.push(`Endpoint: ${customModel.endpoint}`);
+			lines.push('');
+			if (error instanceof Error) {
+				lines.push(`Name: ${error.name}`);
+				if (error.message) { lines.push(`Message: ${error.message}`); }
+				if (error.stack) { lines.push(`\nStack:\n${error.stack}`); }
+				try {
+					const raw: any = { name: error.name, message: error.message, stack: error.stack };
+					// Include non-enumerable properties
+					for (const key of Object.getOwnPropertyNames(error)) {
+						(raw as any)[key] = (error as any)[key];
+					}
+					const seen = new WeakSet();
+					const json = JSON.stringify(raw, (k, v) => {
+						if (typeof v === 'object' && v !== null) {
+							if (seen.has(v)) { return '[Circular]'; }
+							seen.add(v);
+						}
+						return v;
+					}, 2);
+					lines.push(`\nRaw error (JSON):\n${json}`);
+				} catch { /* ignore */ }
+			} else {
+				lines.push(String(error));
+			}
+			// Heuristic hints
+			const msg = error instanceof Error ? (error.message || '') : String(error || '');
+			const lower = msg.toLowerCase();
+			if (lower.includes('fetch') || lower.includes('network') || lower.includes('cors')) {
+				lines.push('');
+				lines.push('Hint: This often indicates a CORS or network issue.');
+			}
+			this.displayAIMessage(lines.join('\n'));
+		}
+    }
+    
+    private displayUserMessage(message: string): void {
+        // Create user message bubble
+        const messageBubble = $('div');
+        messageBubble.style.display = 'flex';
+        messageBubble.style.justifyContent = 'flex-end';
+        messageBubble.style.width = '100%';
+        
+        const messageContent = $('div');
+        messageContent.style.maxWidth = '70%';
+        messageContent.style.padding = '10px 14px';
+        messageContent.style.border = '1px solid var(--vscode-input-border)';
+        messageContent.style.borderRadius = '12px';
+		messageContent.style.marginRight = '12px';
+        messageContent.style.fontSize = '13px';
+        messageContent.style.lineHeight = '1.5';
+        messageContent.style.color = 'var(--vscode-foreground)';
+        messageContent.style.whiteSpace = 'pre-wrap';
+        messageContent.style.wordBreak = 'break-word';
+        messageContent.style.userSelect = 'text';
+        messageContent.style.cursor = 'text';
+        messageContent.textContent = message;
+        
+        messageBubble.appendChild(messageContent);
+        this.messagesArea.appendChild(messageBubble);
+        
+        // Scroll to bottom
+        this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+    }
+    
+    private displayAIMessage(message: string): void {
+        // Create AI message (no bubble, supports IDE-like code blocks)
+        const messageContainer = $('div');
+        messageContainer.style.display = 'flex';
+        messageContainer.style.justifyContent = 'flex-start';
+        messageContainer.style.width = '100%';
+
+        const messageContent = $('div');
+        messageContent.style.maxWidth = '85%';
+        messageContent.style.marginLeft = '12px';
+        messageContent.style.fontSize = '13px';
+        messageContent.style.lineHeight = '1.6';
+        messageContent.style.color = 'var(--vscode-foreground)';
+        messageContent.style.whiteSpace = 'normal';
+        messageContent.style.wordBreak = 'break-word';
+        messageContent.style.userSelect = 'text';
+        messageContent.style.cursor = 'text';
+
+        // Parse fenced code blocks and render text/code segments
+        const segments: Array<{ code: boolean; lang?: string; text: string }> = [];
+        {
+            const regex = /```(\w+)?\n([\s\S]*?)```/g;
+            let lastIndex = 0; let m: RegExpExecArray | null;
+            while ((m = regex.exec(message)) !== null) {
+                if (m.index > lastIndex) {
+                    segments.push({ code: false, text: message.slice(lastIndex, m.index) });
+                }
+                segments.push({ code: true, lang: (m[1] || '').trim() || undefined, text: m[2] });
+                lastIndex = m.index + m[0].length;
+            }
+            if (lastIndex < message.length) {
+                segments.push({ code: false, text: message.slice(lastIndex) });
+            }
+            if (segments.length === 0) {
+                segments.push({ code: false, text: message });
+            }
+        }
+
+        const appendText = (t: string) => {
+            if (!t) { return; }
+            const p = $('div');
+            p.style.whiteSpace = 'pre-wrap';
+            p.style.wordBreak = 'break-word';
+            p.textContent = t;
+            messageContent.appendChild(p);
+        };
+
+        const appendCode = (code: string, lang?: string) => {
+            const wrapper = $('div');
+            wrapper.style.margin = '8px 0';
+            wrapper.style.border = '1px solid var(--vscode-editorWidget-border)';
+            wrapper.style.borderLeft = '3px solid var(--vscode-button-background)';
+            wrapper.style.borderRadius = '6px';
+            wrapper.style.overflow = 'hidden';
+            wrapper.style.background = 'var(--vscode-editor-background)';
+            wrapper.style.boxShadow = 'inset 0 1px 0 rgba(255,255,255,0.03)';
+
+            // Header bar
+            const header = $('div');
+            header.style.display = 'flex';
+            header.style.alignItems = 'center';
+            header.style.justifyContent = 'space-between';
+            header.style.padding = '6px 8px';
+            header.style.background = 'var(--vscode-editorHoverWidget-background)';
+            header.style.color = 'var(--vscode-descriptionForeground)';
+            header.style.borderBottom = '1px solid var(--vscode-editorWidget-border)';
+            header.style.fontSize = '11px';
+
+            const left = $('div');
+            left.style.display = 'flex';
+            left.style.alignItems = 'center';
+            const title = $('span');
+            title.textContent = lang ? `${lang}` : 'code';
+            title.style.fontWeight = '600';
+            title.style.opacity = '0.85';
+            left.appendChild(title);
+
+            header.appendChild(left);
+
+            // Code body
+            const body = $('pre');
+            body.style.margin = '0';
+            body.style.padding = '10px 12px';
+            body.style.whiteSpace = 'pre';
+            body.style.overflow = 'auto';
+            body.style.fontFamily = "var(--monaco-monospace-font, Menlo, Monaco, 'Courier New', monospace)";
+            body.style.fontSize = '12px';
+            body.style.background = 'var(--vscode-editor-background)';
+            body.style.color = 'var(--vscode-editor-foreground)';
+            const codeEl = $('code');
+            codeEl.textContent = code;
+            codeEl.style.color = 'var(--vscode-terminal-ansiCyan)';
+            body.appendChild(codeEl);
+
+            wrapper.appendChild(header);
+            wrapper.appendChild(body);
+            messageContent.appendChild(wrapper);
+        };
+
+        for (const seg of segments) {
+            if (!seg.code) {
+                appendText(seg.text);
+            } else {
+                appendCode(seg.text, seg.lang);
+            }
+        }
+
+        messageContainer.appendChild(messageContent);
+        this.messagesArea.appendChild(messageContainer);
+
+        // Scroll to bottom
+        this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+    }
+
+	private toReadable(text: string): string {
+		// Lightweight readability + concision heuristics while preserving code blocks
+		// 1) Split into segments to avoid touching fenced code blocks
+		const segments: { code: boolean; text: string }[] = [];
+		{
+			const parts = text.split(/```/);
+			for (let i = 0; i < parts.length; i++) {
+				segments.push({ code: i % 2 === 1, text: parts[i] });
+			}
+		}
+		const cleaned: string[] = [];
+		for (const seg of segments) {
+			if (seg.code) {
+				cleaned.push('```' + seg.text + '```');
+				continue;
+			}
+			let s = seg.text;
+			// Trim trailing spaces and collapse excessive blank lines
+			s = s.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n');
+			// Remove filler/openers commonly produced by LLMs
+			s = s.replace(/^\s*here(?:'|’)s a breakdown.*$/gim, '')
+				 .replace(/^\s*in essence.*$/gim, '')
+				 .replace(/^\s*this file .* is.*responsible.*$/gim, '')
+				 .replace(/^\s*this is a common pattern.*$/gim, '')
+				 .replace(/^\s*after this file is executed.*$/gim, '')
+				 .replace(/^\s*so,?\s+/gim, '')
+				 .replace(/^\s*overall,?\s+/gim, '');
+			// Convert simple ordered list to bullets for compactness
+			s = s.replace(/^(\s*)\d+\.\s+/gm, '$1- ');
+			// Ensure blank line before bullets
+			s = s.replace(/([^\n])\n(-\s)/g, '$1\n\n$2');
+			// Ensure code fences have blank lines before
+			s = s.replace(/([^\n])\n```/g, '$1\n\n```');
+			cleaned.push(s);
+		}
+		let out = cleaned.join('');
+		// Final tidy: collapse triple+ newlines
+		out = out.replace(/\n{3,}/g, '\n\n');
+		return out.trim();
+	}
+
+	private showLoadingIndicator(): void {
+		this.hideLoadingIndicator();
+		const phrases = [
+			'Thinking',
+			'Planning',
+			'Analyzing',
+			'Parsing input',
+			'Mapping context',
+			'Drafting answer',
+			'Refining steps',
+			'Aligning the pixels',
+			'Brewing ideas',
+			'Crunching context',
+			'Fetching braincells',
+			'Counting semicolons',
+			'Optimizing vibes'
+		];
+		const container = $('div');
+		container.style.display = 'flex';
+		container.style.justifyContent = 'flex-start';
+		container.style.width = '100%';
+		const content = $('div');
+		content.style.maxWidth = '85%';
+		content.style.marginLeft = '12px';
+		content.style.fontSize = '12px';
+		content.style.lineHeight = '1.5';
+		content.style.color = 'var(--vscode-descriptionForeground)';
+		content.style.opacity = '0.9';
+		content.style.userSelect = 'none';
+		let i = 0;
+		let dots = 0;
+		const render = () => {
+			const base = phrases[i % phrases.length];
+			const suffix = '.'.repeat(dots % 4); // '', '.', '..', '...'
+			content.textContent = `${base}${suffix}`;
+		};
+		render();
+		let tick = 0;
+		this.loadingIndicatorInterval = window.setInterval(() => {
+			tick += 1;
+			dots = tick % 4; // dots animate every 500ms
+			if (tick % 3 === 0) { // change phrase every 1.5s (3 * 500ms)
+				i = (i + 1) % phrases.length;
+			}
+			render();
+		}, 500);
+		container.appendChild(content);
+		this.messagesArea.appendChild(container);
+		this.messagesArea.scrollTop = this.messagesArea.scrollHeight;
+		this.loadingIndicatorEl = container;
+	}
+	private async hideLoadingIndicatorAfterMin(startAt: number): Promise<void> {
+		const minMs = 1000; // minimum 1s
+		const elapsed = Date.now() - startAt;
+		if (elapsed < minMs) {
+			await new Promise(res => setTimeout(res, minMs - elapsed));
+		}
+		this.hideLoadingIndicator();
+	}
+
+	private hideLoadingIndicator(): void {
+		if (this.loadingIndicatorInterval !== undefined) {
+			window.clearInterval(this.loadingIndicatorInterval);
+			this.loadingIndicatorInterval = undefined;
+		}
+		if (this.loadingIndicatorEl && this.loadingIndicatorEl.parentElement) {
+			this.loadingIndicatorEl.parentElement.removeChild(this.loadingIndicatorEl);
+		}
+		this.loadingIndicatorEl = undefined;
+	}
+    
+    private showAddModelPage(existingModel?: { type: string; name: string; endpoint: string; modelIdentifier: string; apiKey: string }): void {
+        // Clear messages area and show add model configuration page
+        while (this.messagesArea.firstChild) {
+            this.messagesArea.removeChild(this.messagesArea.firstChild);
+        }
+        
+        const isEditing = !!existingModel;
+        
+        // Create add model page container
+        const pageContainer = $('div');
+        pageContainer.style.padding = '20px';
+        pageContainer.style.maxWidth = '600px';
+        pageContainer.style.margin = '0 auto';
+        
+        // Title
+        const title = $('h2');
+        title.textContent = isEditing ? 'Edit Custom Model' : 'Add Custom Model';
+        title.style.fontSize = '18px';
+        title.style.fontWeight = '600';
+        title.style.marginBottom = '20px';
+        title.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(title);
+        
+        // Model Type Selection
+        const typeLabel = $('label');
+        typeLabel.textContent = 'Model Type';
+        typeLabel.style.display = 'block';
+        typeLabel.style.fontSize = '13px';
+        typeLabel.style.fontWeight = '600';
+        typeLabel.style.marginBottom = '8px';
+        typeLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(typeLabel);
+        
+        const typeSelect = $('select') as HTMLSelectElement;
+        typeSelect.style.width = '100%';
+        typeSelect.style.padding = '8px';
+        typeSelect.style.marginBottom = '20px';
+        typeSelect.style.border = '1px solid var(--vscode-input-border)';
+        typeSelect.style.borderRadius = '4px';
+        typeSelect.style.background = 'var(--vscode-input-background)';
+        typeSelect.style.color = 'var(--vscode-input-foreground)';
+        typeSelect.style.fontSize = '13px';
+        
+        ['LM Studio', 'Ollama', 'OpenAI Compatible API'].forEach(type => {
+            const option = $('option') as HTMLOptionElement;
+            option.value = type;
+            option.textContent = type;
+            typeSelect.appendChild(option);
+        });
+        if (existingModel) {
+            typeSelect.value = existingModel.type;
+        }
+        pageContainer.appendChild(typeSelect);
+        
+        // Model Name
+        const nameLabel = $('label');
+        nameLabel.textContent = 'Model Name';
+        nameLabel.style.display = 'block';
+        nameLabel.style.fontSize = '13px';
+        nameLabel.style.fontWeight = '600';
+        nameLabel.style.marginBottom = '8px';
+        nameLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(nameLabel);
+        
+        const nameInput = $('input', { type: 'text', placeholder: 'e.g., llama-3.1-70b' }) as HTMLInputElement;
+        nameInput.style.width = '100%';
+        nameInput.style.padding = '8px';
+        nameInput.style.marginBottom = '20px';
+        nameInput.style.border = '1px solid var(--vscode-input-border)';
+        nameInput.style.borderRadius = '4px';
+        nameInput.style.background = 'var(--vscode-input-background)';
+        nameInput.style.color = 'var(--vscode-input-foreground)';
+        nameInput.style.fontSize = '13px';
+        nameInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            nameInput.value = existingModel.name;
+        }
+        pageContainer.appendChild(nameInput);
+        
+        // API Endpoint
+        const endpointLabel = $('label');
+        endpointLabel.textContent = 'API Endpoint';
+        endpointLabel.style.display = 'block';
+        endpointLabel.style.fontSize = '13px';
+        endpointLabel.style.fontWeight = '600';
+        endpointLabel.style.marginBottom = '8px';
+        endpointLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(endpointLabel);
+        
+        const endpointInput = $('input', { type: 'text', placeholder: 'http://localhost:1234/v1' }) as HTMLInputElement;
+        endpointInput.style.width = '100%';
+        endpointInput.style.padding = '8px';
+        endpointInput.style.marginBottom = '20px';
+        endpointInput.style.border = '1px solid var(--vscode-input-border)';
+        endpointInput.style.borderRadius = '4px';
+        endpointInput.style.background = 'var(--vscode-input-background)';
+        endpointInput.style.color = 'var(--vscode-input-foreground)';
+        endpointInput.style.fontSize = '13px';
+        endpointInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            endpointInput.value = existingModel.endpoint;
+        }
+        pageContainer.appendChild(endpointInput);
+        
+        // Model Identifier
+        const identifierLabel = $('label');
+        identifierLabel.textContent = 'Model Identifier';
+        identifierLabel.style.display = 'block';
+        identifierLabel.style.fontSize = '13px';
+        identifierLabel.style.fontWeight = '600';
+        identifierLabel.style.marginBottom = '8px';
+        identifierLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(identifierLabel);
+        
+        const identifierInput = $('input', { type: 'text', placeholder: 'e.g., gpt-4, llama-3.1-70b' }) as HTMLInputElement;
+        identifierInput.style.width = '100%';
+        identifierInput.style.padding = '8px';
+        identifierInput.style.marginBottom = '20px';
+        identifierInput.style.border = '1px solid var(--vscode-input-border)';
+        identifierInput.style.borderRadius = '4px';
+        identifierInput.style.background = 'var(--vscode-input-background)';
+        identifierInput.style.color = 'var(--vscode-input-foreground)';
+        identifierInput.style.fontSize = '13px';
+        identifierInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            identifierInput.value = existingModel.modelIdentifier;
+        }
+        pageContainer.appendChild(identifierInput);
+        
+        // API Key (optional)
+        const keyLabel = $('label');
+        keyLabel.textContent = 'API Key (optional)';
+        keyLabel.style.display = 'block';
+        keyLabel.style.fontSize = '13px';
+        keyLabel.style.fontWeight = '600';
+        keyLabel.style.marginBottom = '8px';
+        keyLabel.style.color = 'var(--vscode-foreground)';
+        pageContainer.appendChild(keyLabel);
+        
+        const keyInput = $('input', { type: 'password', placeholder: 'Leave empty for local models' }) as HTMLInputElement;
+        keyInput.style.width = '100%';
+        keyInput.style.padding = '8px';
+        keyInput.style.marginBottom = '30px';
+        keyInput.style.border = '1px solid var(--vscode-input-border)';
+        keyInput.style.borderRadius = '4px';
+        keyInput.style.background = 'var(--vscode-input-background)';
+        keyInput.style.color = 'var(--vscode-input-foreground)';
+        keyInput.style.fontSize = '13px';
+        keyInput.style.boxSizing = 'border-box';
+        if (existingModel) {
+            keyInput.value = existingModel.apiKey;
+            // Load API key from secret storage when editing
+            (async () => {
+                try {
+                    const sk = await this.secretStorageService.get(`acuxcode.customModels.${existingModel.name}@${existingModel.endpoint}`);
+                    if (sk) { keyInput.value = sk; }
+                } catch { /* ignore */ }
+            })();
+        }
+        pageContainer.appendChild(keyInput);
+        
+        // Update field visibility based on provider type
+        const updateFieldsForProvider = () => {
+            const selectedType = typeSelect.value;
+            
+            if (selectedType === 'LM Studio') {
+                // LM Studio: Show name and endpoint, hide identifier and API key
+                endpointLabel.style.display = 'block';
+                endpointInput.style.display = 'block';
+                identifierLabel.style.display = 'none';
+                identifierInput.style.display = 'none';
+                keyLabel.style.display = 'none';
+                keyInput.style.display = 'none';
+                // Set defaults
+                if (!endpointInput.value) {
+                    endpointInput.value = 'http://localhost:1234/v1';
+                }
+                endpointInput.placeholder = 'http://localhost:1234/v1';
+                endpointLabel.textContent = 'LM Studio Server URL';
+                identifierInput.value = '';
+                keyInput.value = '';
+            } else if (selectedType === 'Ollama') {
+                // Ollama: Show name, endpoint, and model identifier
+                endpointLabel.style.display = 'block';
+                endpointInput.style.display = 'block';
+                identifierLabel.style.display = 'block';
+                identifierInput.style.display = 'block';
+                keyLabel.style.display = 'none';
+                keyInput.style.display = 'none';
+                // Set defaults
+                if (!endpointInput.value) {
+                    endpointInput.value = 'http://localhost:11434';
+                }
+                endpointInput.placeholder = 'http://localhost:11434';
+                endpointLabel.textContent = 'Ollama Server URL';
+                identifierLabel.textContent = 'Model Name';
+                identifierInput.placeholder = 'e.g., llama3.1, mistral, codellama';
+                keyInput.value = '';
+            } else {
+                // OpenAI Compatible API: Show all fields
+                endpointLabel.style.display = 'block';
+                endpointInput.style.display = 'block';
+                identifierLabel.style.display = 'block';
+                identifierInput.style.display = 'block';
+                keyLabel.style.display = 'block';
+                keyInput.style.display = 'block';
+                endpointInput.placeholder = 'https://api.openai.com/v1';
+                endpointLabel.textContent = 'API Endpoint';
+                identifierLabel.textContent = 'Model Identifier';
+                identifierInput.placeholder = 'e.g., gpt-4, gpt-3.5-turbo';
+                keyLabel.textContent = 'API Key';
+            }
+        };
+        
+        typeSelect.onchange = updateFieldsForProvider;
+        updateFieldsForProvider(); // Call initially to set correct visibility
+        
+        // Buttons container
+        const buttonsContainer = $('div');
+        buttonsContainer.style.display = 'flex';
+        buttonsContainer.style.gap = '12px';
+        buttonsContainer.style.justifyContent = 'flex-end';
+
+		// Test Connection status label
+		const testStatus = $('div');
+		testStatus.style.marginTop = '8px';
+		testStatus.style.fontSize = '12px';
+		testStatus.style.color = 'var(--vscode-descriptionForeground)';
+        
+        // Cancel button
+        const cancelButton = $('button');
+        cancelButton.textContent = 'Cancel';
+        cancelButton.style.padding = '8px 16px';
+        cancelButton.style.border = '1px solid var(--vscode-input-border)';
+        cancelButton.style.borderRadius = '4px';
+        cancelButton.style.background = 'var(--vscode-input-background)';
+        cancelButton.style.color = 'var(--vscode-foreground)';
+        cancelButton.style.fontSize = '13px';
+        cancelButton.style.cursor = 'pointer';
+        cancelButton.onclick = () => {
+            // Clear the page and return to chat
+            while (this.messagesArea.firstChild) {
+                this.messagesArea.removeChild(this.messagesArea.firstChild);
+            }
+        };
+        buttonsContainer.appendChild(cancelButton);
+        
+		// Test Connection button
+		const testButton = $('button');
+		testButton.textContent = 'Test Connection';
+		testButton.style.padding = '8px 12px';
+		testButton.style.border = '1px solid var(--vscode-input-border)';
+		testButton.style.borderRadius = '4px';
+		testButton.style.background = 'var(--vscode-input-background)';
+		testButton.style.color = 'var(--vscode-foreground)';
+		testButton.style.fontSize = '13px';
+		testButton.style.cursor = 'pointer';
+		testButton.onclick = async () => {
+			try {
+				testStatus.textContent = 'Testing...';
+				const dataForTest = {
+					type: typeSelect.value,
+					name: nameInput.value.trim() || '(unsaved)',
+					endpoint: endpointInput.value.trim(),
+					modelIdentifier: identifierInput.value.trim(),
+					apiKey: keyInput.value.trim()
+				};
+				// Build request body and headers
+				const reqBody = {
+					model: dataForTest.modelIdentifier || 'default',
+					messages: [{ role: 'user', content: 'hello' }],
+					stream: false
+				} as any;
+				const headers: Record<string, string> = {
+					'Content-Type': 'application/json',
+					'Accept': 'application/json'
+				};
+				let apiUrl = dataForTest.endpoint;
+				const ensureTrailing = (base: string, segment: string) => base.endsWith(segment) ? base : `${base}${segment}`;
+				const hasV1 = (url: string) => /\/v1(\/|$)/.test(url);
+				const endpointLower = (dataForTest.endpoint || '').toLowerCase();
+				if (dataForTest.apiKey) {
+					headers['Authorization'] = `Bearer ${dataForTest.apiKey}`;
+				}
+				if (dataForTest.type === 'Ollama') {
+					apiUrl = `${dataForTest.endpoint.replace(/\/$/, '')}/api/generate`;
+					reqBody.model = dataForTest.modelIdentifier;
+					reqBody.prompt = 'hello';
+					delete reqBody.messages;
+				} else if (endpointLower.includes('openai.azure.com')) {
+					if (dataForTest.apiKey) {
+						delete headers['Authorization'];
+						headers['api-key'] = dataForTest.apiKey;
+					}
+					const root = dataForTest.endpoint.replace(/\/$/, '');
+					const hasApiVersion = /[?&]api-version=/.test(root);
+					const apiVersion = '2024-02-15-preview';
+					if (/\/openai\/deployments\//.test(root)) {
+						apiUrl = hasApiVersion ? root : `${root}${root.includes('?') ? '&' : '?'}api-version=${apiVersion}`;
+					} else {
+						const dep = encodeURIComponent(dataForTest.modelIdentifier || 'deployment');
+						apiUrl = `${root}/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`;
+					}
+					delete reqBody.model;
+				} else if (dataForTest.type === 'LM Studio') {
+					const base = hasV1(dataForTest.endpoint) ? dataForTest.endpoint : ensureTrailing(dataForTest.endpoint.replace(/\/$/, ''), '/v1');
+					apiUrl = `${base}/chat/completions`;
+				} else {
+					const base = hasV1(dataForTest.endpoint) ? dataForTest.endpoint : ensureTrailing(dataForTest.endpoint.replace(/\/$/, ''), '/v1');
+					apiUrl = `${base}/chat/completions`;
+				}
+				// OpenRouter headers (minimal)
+				if (endpointLower.includes('openrouter.ai')) {
+					headers['HTTP-Referer'] = 'https://acuxcode.local';
+					headers['X-Title'] = 'AcuxCode';
+				}
+				const ctx = await this.requestService.request({ type: 'POST', url: apiUrl, headers: headers as any, data: JSON.stringify(reqBody), timeout: 15000 }, CancellationToken.None);
+				if (isSuccess(ctx)) {
+					testStatus.style.color = 'var(--vscode-terminal-ansiGreen)';
+					testStatus.textContent = `Success: ${ctx.res.statusCode}`;
+				} else {
+					const body = (await asText(ctx)) ?? '';
+					testStatus.style.color = 'var(--vscode-errorForeground)';
+					testStatus.textContent = `Failed: ${ctx.res.statusCode} ${body.slice(0, 300)}`;
+				}
+			} catch (err) {
+				testStatus.style.color = 'var(--vscode-errorForeground)';
+				testStatus.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
+			}
+		};
+		buttonsContainer.appendChild(testButton);
+
+		// Save button
+        const saveButton = $('button');
+        saveButton.textContent = isEditing ? 'Save Changes' : 'Add Model';
+        saveButton.style.padding = '8px 16px';
+        saveButton.style.border = 'none';
+        saveButton.style.borderRadius = '4px';
+        saveButton.style.background = 'var(--vscode-button-background)';
+        saveButton.style.color = 'var(--vscode-button-foreground)';
+        saveButton.style.fontSize = '13px';
+        saveButton.style.fontWeight = '600';
+        saveButton.style.cursor = 'pointer';
+		saveButton.onclick = () => {
+            const modelData = {
+                type: typeSelect.value,
+                name: nameInput.value.trim(),
+                endpoint: endpointInput.value.trim(),
+                modelIdentifier: identifierInput.value.trim(),
+                apiKey: keyInput.value.trim()
+            };
+            
+            // Validate required fields based on provider type
+            if (!modelData.name) {
+                this.displayAIMessage('Please enter a Model Name.');
+                return;
+            }
+            
+            if (modelData.type === 'LM Studio') {
+                // LM Studio: Require name and endpoint
+                if (!modelData.endpoint) {
+                    this.displayAIMessage('Please enter the LM Studio Server URL.');
+                    return;
+                }
+                modelData.modelIdentifier = '';
+                modelData.apiKey = '';
+            } else if (modelData.type === 'Ollama') {
+                // Ollama: Require name, endpoint, and model identifier
+                if (!modelData.endpoint) {
+                    this.displayAIMessage('Please enter the Ollama Server URL.');
+                    return;
+                }
+                if (!modelData.modelIdentifier) {
+                    this.displayAIMessage('Please enter the Model Name (e.g., llama3.1, mistral).');
+                    return;
+                }
+                modelData.apiKey = '';
+            } else {
+                // OpenAI Compatible API: Require all fields
+                if (!modelData.endpoint) {
+                    this.displayAIMessage('Please enter the API Endpoint.');
+                    return;
+                }
+                if (!modelData.modelIdentifier) {
+                    this.displayAIMessage('Please enter the Model Identifier.');
+                    return;
+                }
+                if (!modelData.apiKey) {
+                    this.displayAIMessage('Please enter the API Key.');
+                    return;
+                }
+            }
+            
+			if (isEditing && existingModel) {
+                // Update existing model
+                const index = this.customModels.findIndex(m => 
+                    m.name === existingModel.name && 
+                    m.endpoint === existingModel.endpoint
+                );
+                if (index !== -1) {
+                    this.customModels[index] = modelData;
+                    console.log('[AcuxCode] Custom model updated:', modelData);
+                }
+				// If name/endpoint changed, remove old secret
+				if (existingModel.name !== modelData.name || existingModel.endpoint !== modelData.endpoint) {
+					(async () => { try { await this.secretStorageService.delete(`acuxcode.customModels.${existingModel.name}@${existingModel.endpoint}`); } catch {} })();
+				}
+            } else {
+                // Add new model
+                this.customModels.push(modelData);
+                console.log('[AcuxCode] Custom model added:', modelData);
+            }
+            
+            // Persist to storage (non-sensitive)
+            const PERSIST_SCOPE = StorageScope.PROFILE;
+            this.storageService.store(this.storageKeyCustomModels, JSON.stringify(this.customModels.map(m => ({ ...m, apiKey: '' }))), PERSIST_SCOPE, StorageTarget.USER);
+
+            // Persist API key to secret storage
+            const secretKeyId = `acuxcode.customModels.${modelData.name}@${modelData.endpoint}`;
+            (async () => {
+                try {
+                    if (modelData.apiKey) {
+                        await this.secretStorageService.set(secretKeyId, modelData.apiKey);
+                    } else {
+                        await this.secretStorageService.delete(secretKeyId);
+                    }
+                } catch { /* ignore secret storage errors */ }
+            })();
+            
+            console.log('[AcuxCode] Total custom models:', this.customModels.length);
+            
+			// Auto-select the just-saved model and persist
+			this.selectedModel = modelData.name;
+			this.storageService.store(this.storageKeySelectedModel, this.selectedModel, PERSIST_SCOPE, StorageTarget.USER);
+			console.log('[AcuxCode] Auto-selected saved model:', this.selectedModel);
+			
+			// Clear the add model page and return to fresh chat
+			while (this.messagesArea.firstChild) {
+				this.messagesArea.removeChild(this.messagesArea.firstChild);
+			}
+        };
+        buttonsContainer.appendChild(saveButton);
+        
+		pageContainer.appendChild(buttonsContainer);
+		pageContainer.appendChild(testStatus);
+        this.messagesArea.appendChild(pageContainer);
+    }
+    
+    private updateFilesDisplay(): void {
+        console.log('[AcuxCode] updateFilesDisplay called, files:', this.attachedFiles.length);
+        console.log('[AcuxCode] filesDisplayArea element:', this.filesDisplayArea);
+        
+        // Clear existing content using DOM methods (not innerHTML for security)
+        while (this.filesDisplayArea.firstChild) {
+            this.filesDisplayArea.removeChild(this.filesDisplayArea.firstChild);
+        }
+        
+        if (this.attachedFiles.length === 0) {
+            console.log('[AcuxCode] No files, hiding display area');
+            this.filesDisplayArea.style.display = 'none';
+            return;
+        }
+        
+        console.log('[AcuxCode] Showing files display area');
+        this.filesDisplayArea.style.display = 'flex';
+        
+        this.attachedFiles.forEach((file, index) => {
+            const fileChip = dom.$('div');
+            fileChip.classList.add('chat-attached-context-pill');
+            fileChip.style.display = 'flex';
+            fileChip.style.alignItems = 'center';
+            fileChip.style.gap = '4px';
+            fileChip.style.padding = '2px 6px';
+            fileChip.style.backgroundColor = 'transparent';
+            fileChip.style.color = 'var(--vscode-foreground)';
+            fileChip.style.border = '1px solid var(--vscode-input-border)';
+            fileChip.style.borderRadius = '10px';
+            fileChip.style.fontSize = '11px';
+            fileChip.style.maxWidth = '180px';
+            fileChip.classList.add('show-file-icons');
+
+            // Use ResourceLabel for proper file icons
+            const labelContainer = dom.$('span');
+            labelContainer.style.display = 'flex';
+            labelContainer.style.alignItems = 'center';
+            labelContainer.style.flex = '1';
+            labelContainer.style.minWidth = '0';
+            
+            const resourceLabel = this.resourceLabels.create(labelContainer, { supportIcons: true });
+            resourceLabel.setFile(file.uri, { fileKind: 0 /* FileKind.FILE */ });
+
+            // Remove button
+            const removeBtn = dom.$('button');
+            removeBtn.textContent = '×';
+            removeBtn.style.border = 'none';
+            removeBtn.style.background = 'none';
+            removeBtn.style.color = 'inherit';
+            removeBtn.style.cursor = 'pointer';
+            removeBtn.style.padding = '0';
+            removeBtn.style.fontSize = '14px';
+            removeBtn.style.lineHeight = '1';
+            removeBtn.style.width = '14px';
+            removeBtn.style.height = '14px';
+            removeBtn.style.display = 'flex';
+            removeBtn.style.alignItems = 'center';
+            removeBtn.style.justifyContent = 'center';
+            removeBtn.onclick = () => this.removeFile(index);
+
+            fileChip.appendChild(labelContainer);
+            fileChip.appendChild(removeBtn);
+            this.filesDisplayArea.appendChild(fileChip);
+        });
+    }
+    
+}
